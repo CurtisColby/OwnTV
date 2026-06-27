@@ -190,12 +190,33 @@ class EpgViewModel(
     private val _canZap = MutableStateFlow(false)
     val canZap: StateFlow<Boolean> = _canZap.asStateFlow()
 
-    /** Tune to a channel from the guide (fullscreen playback + history, like the Live list). */
+    /** Tune to a channel from the guide (fullscreen playback + history, like the Live list).
+     *
+     *  Mid-show-join (SurfTV): for a catch-up-capable channel we drop into the CURRENT programme already
+     *  in progress — like real live TV — instead of restarting from 0:00. We look up what's on now and how
+     *  far in we are, then play the channel's "/edge" URL (the current file served from its start) as a
+     *  LIVE stream but tell the player to seek to that offset. Playing as live (isLive = true) is what keeps
+     *  channel-surfing enabled; the seek is what drops you mid-show. The "/edge" backend serves offset 0, so
+     *  the seek happens exactly once (here), never doubled. Anything missing (no EPG match, no current
+     *  programme, just-started show) falls straight back to the plain live tune — never worse than today.
+     *  Because zap() routes through play(), surfing inherits the same mid-show join automatically. */
     fun play(channel: ChannelEntity) {
         lastTunedChannelId = channel.id
         _canZap.value = _state.value.channels.size > 1
-        player.play(channel.streamUrl, title = channel.name, logoUrl = channel.logoUrl, isLive = true)
         viewModelScope.launch {
+            val join = midShowJoin(channel) // (edgeUrl, offsetMs) or null
+            if (join != null) {
+                val (edgeUrl, offsetMs, progTitle) = join
+                // isLive = true → stays in the live zap list (surfing works). startPositionMs → mpv seeks
+                // into the file to the in-progress point. The /edge file is a normal seekable Plex file, so
+                // the absolute seek lands cleanly; isLive only governs app behaviour (surfing/HUD), not the
+                // underlying file's seekability.
+                player.play(edgeUrl, title = channel.name, subtitle = progTitle, logoUrl = channel.logoUrl,
+                    isLive = true, startPositionMs = offsetMs)
+            } else {
+                // Plain live tune (unchanged behaviour) — show just started, no EPG, or not a SurfTV channel.
+                player.play(channel.streamUrl, title = channel.name, logoUrl = channel.logoUrl, isLive = true)
+            }
             val pid = currentProfileId() ?: return@launch
             runCatching {
                 historyDao.record(WatchHistoryEntity(profileId = pid, mediaType = MediaType.LIVE, itemId = channel.id))
@@ -203,6 +224,24 @@ class EpgViewModel(
                 android.util.Log.w("OwnTVHome", "play history record failed channelId=${channel.id} profile=$pid", t)
             }
         }
+    }
+
+    /** Result of a mid-show-join computation: the /edge URL to play, the seek offset, and the show title. */
+    private data class MidShowJoin(val edgeUrl: String, val offsetMs: Long, val title: String)
+
+    /** Work out where to drop into [channel]'s current programme, or null to fall back to a plain live tune.
+     *  Null whenever the channel isn't catch-up-capable, has no matched/current programme, or the show only
+     *  just started (< [MIDSHOW_MIN_OFFSET_SEC] — the live edge is effectively the start anyway). */
+    private suspend fun midShowJoin(channel: ChannelEntity): MidShowJoin? {
+        if (!channel.catchup) return null
+        val epgKey = channel.epgChannelId?.trim()?.lowercase()?.takeIf { it.isNotEmpty() } ?: return null
+        val now = System.currentTimeMillis()
+        val current = withContext(kotlinx.coroutines.Dispatchers.IO) { epgDao.nowPlaying(epgKey, now) } ?: return null
+        val offsetMs = now - current.startMs
+        if (offsetMs < MIDSHOW_MIN_OFFSET_SEC * 1000) return null
+        // Build the live-edge URL from the channel's live stream URL: ".../stream/<n>" → ".../stream/<n>/edge".
+        val edgeUrl = channel.streamUrl.trimEnd('/') + "/edge"
+        return MidShowJoin(edgeUrl, offsetMs, current.title)
     }
 
     /**
@@ -621,6 +660,9 @@ class EpgViewModel(
 
     companion object {
         const val GRID_HOURS = 24
+        // Mid-show-join: skip the seekable archive join when the current programme has been running less
+        // than this (the live edge is essentially the start anyway → keep the fast live path).
+        private const val MIDSHOW_MIN_OFFSET_SEC = 60L
         private const val HALF_HOUR_MS = 30L * 60 * 1000
         private const val DAY_MS = 24L * 60 * 60 * 1000
         // How far back the Guide may extend for catch-up (must stay within EpgRepository's retention).
