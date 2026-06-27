@@ -190,25 +190,12 @@ class EpgViewModel(
     private val _canZap = MutableStateFlow(false)
     val canZap: StateFlow<Boolean> = _canZap.asStateFlow()
 
-    /** Tune to a channel from the guide (fullscreen playback + history, like the Live list).
-     *
-     *  Mid-show-join (SurfTV): for a catch-up-capable channel we drop into the CURRENT programme already
-     *  in progress — like real live TV — instead of restarting its file from 0:00. We look up what's on
-     *  now, and if it's been running more than [MIDSHOW_MIN_OFFSET_SEC] we play that programme's catch-up
-     *  URL seekable (the same proven archive path the guide's "Watch from start" and live rewind use).
-     *  Anything missing (no EPG match, no current programme, just-started show, unbuildable URL) falls
-     *  straight back to the normal live stream — so playback is never worse than today, just sometimes
-     *  better. Zapping stays enabled (this channel remains in the surf list), so surfing inherits the
-     *  same join automatically. */
+    /** Tune to a channel from the guide (fullscreen playback + history, like the Live list). */
     fun play(channel: ChannelEntity) {
         lastTunedChannelId = channel.id
         _canZap.value = _state.value.channels.size > 1
+        player.play(channel.streamUrl, title = channel.name, logoUrl = channel.logoUrl, isLive = true)
         viewModelScope.launch {
-            val joined = tryJoinInProgress(channel)
-            if (!joined) {
-                // Normal live tune (unchanged behaviour: fast ExoPlayer live edge).
-                player.play(channel.streamUrl, title = channel.name, logoUrl = channel.logoUrl, isLive = true)
-            }
             val pid = currentProfileId() ?: return@launch
             runCatching {
                 historyDao.record(WatchHistoryEntity(profileId = pid, mediaType = MediaType.LIVE, itemId = channel.id))
@@ -216,24 +203,6 @@ class EpgViewModel(
                 android.util.Log.w("OwnTVHome", "play history record failed channelId=${channel.id} profile=$pid", t)
             }
         }
-    }
-
-    /** Attempt to start [channel] inside the current programme (mid-show-join). Returns true if it started
-     *  archive playback at an offset; false if the caller should fall back to the plain live stream. */
-    private suspend fun tryJoinInProgress(channel: ChannelEntity): Boolean {
-        if (!channel.catchup) return false
-        val epgKey = channel.epgChannelId?.trim()?.lowercase()?.takeIf { it.isNotEmpty() } ?: return false
-        val now = System.currentTimeMillis()
-        val current = withContext(kotlinx.coroutines.Dispatchers.IO) { epgDao.nowPlaying(epgKey, now) } ?: return false
-        // Only worth joining mid-show if the programme has been running a meaningful amount — otherwise the
-        // live edge is effectively the start anyway, and the fast live path is preferable.
-        val offsetSec = (now - current.startMs) / 1000
-        if (offsetSec < MIDSHOW_MIN_OFFSET_SEC) return false
-        val url = withContext(kotlinx.coroutines.Dispatchers.IO) { catchupUrlFor(channel, current) } ?: return false
-        // isLive = false → seekable with a normal progress bar (you land partway in). preferSoftware →
-        // tolerate mid-GOP archive segments the hardware decoder can't open.
-        player.play(url, title = channel.name, subtitle = current.title, logoUrl = channel.logoUrl, isLive = false, preferSoftware = true)
-        return true
     }
 
     /**
@@ -652,9 +621,6 @@ class EpgViewModel(
 
     companion object {
         const val GRID_HOURS = 24
-        // Mid-show-join: skip the seekable archive join when the current programme has been running less
-        // than this (the live edge is essentially the start anyway → keep the fast live path).
-        private const val MIDSHOW_MIN_OFFSET_SEC = 60L
         private const val HALF_HOUR_MS = 30L * 60 * 1000
         private const val DAY_MS = 24L * 60 * 60 * 1000
         // How far back the Guide may extend for catch-up (must stay within EpgRepository's retention).
