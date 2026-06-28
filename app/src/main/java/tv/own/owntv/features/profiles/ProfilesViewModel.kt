@@ -10,7 +10,6 @@ import kotlinx.coroutines.launch
 import tv.own.owntv.core.database.dao.ProfileDao
 import tv.own.owntv.core.database.dao.SourceDao
 import tv.own.owntv.core.database.entity.ProfileEntity
-import tv.own.owntv.core.database.entity.ProfileSourceCrossRef
 import tv.own.owntv.core.launcher.LauncherIntegrationRepository
 import tv.own.owntv.core.util.Pin
 import tv.own.owntv.features.settings.data.SettingsRepository
@@ -40,8 +39,9 @@ class ProfilesViewModel(
     fun verifyPin(profile: ProfileEntity, pin: String): Boolean = Pin.verify(pin, profile.pinHash)
 
     /**
-     * Create a new profile. New profiles inherit the existing sources (single-account, multi-viewer)
-     * so they immediately have content; favorites/history stay per-profile.
+     * Create a new profile. New profiles start EMPTY (no sources) — each profile owns its own
+     * channel lineup. Add sources to it from Settings → Manage Sources while that profile is active.
+     * Favorites/history are already per-profile.
      */
     fun create(name: String, avatarId: Int, isKids: Boolean, pin: String?, onCreated: (Long) -> Unit = {}) {
         viewModelScope.launch {
@@ -54,8 +54,7 @@ class ProfilesViewModel(
                     pinHash = pin?.takeIf { it.isNotBlank() }?.let { Pin.hash(it) },
                 ),
             )
-            // Link every existing source to the new profile.
-            sourceDao.observeForProfileOnceLinked(id)
+            // New profiles start with no sources by design (separate lineups per profile).
             onCreated(id)
         }
     }
@@ -95,13 +94,25 @@ class ProfilesViewModel(
             if (activeProfileId == profile.id) {
                 settings.setActiveProfile(remainingProfileId ?: -1L)
             }
+            // If the deleted profile was the launch default, clear it so the launch resolver falls
+            // back to the first unlocked profile rather than pointing at a row that no longer exists.
+            if (settings.defaultProfileId.first() == profile.id) {
+                settings.setDefaultProfile(-1L)
+            }
         }
     }
-}
 
-/** Links all currently-known sources to a freshly created profile (helper kept off the entity API). */
-private suspend fun SourceDao.observeForProfileOnceLinked(profileId: Long) {
-    // All sources currently belong to existing profiles; share them with the new one.
-    val allSourceIds = allSourceIds()
-    allSourceIds.forEach { link(ProfileSourceCrossRef(profileId = profileId, sourceId = it)) }
+    /** The profile id the app opens into on cold start (-1 = not set; resolver falls back to first unlocked). */
+    val defaultProfileId: StateFlow<Long> = settings.defaultProfileId
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), -1L)
+
+    /**
+     * Mark [profile] as the launch default. Guarded: a PIN-locked profile can never be the default,
+     * because launch must open without a PIN prompt. Callers should not offer this for locked
+     * profiles; this is the backstop.
+     */
+    fun setDefaultProfile(profile: ProfileEntity) {
+        if (profile.pinHash != null) return
+        viewModelScope.launch { settings.setDefaultProfile(profile.id) }
+    }
 }

@@ -98,14 +98,32 @@ class MainActivity : ComponentActivity() {
 
             val profilesVm: ProfilesViewModel = koinViewModel()
             val profiles by profilesVm.profiles.collectAsStateWithLifecycle()
-            var gatePassed by remember { mutableStateOf(false) }
+            val defaultProfileId by profilesVm.defaultProfileId.collectAsStateWithLifecycle()
+            // gatePassed starts TRUE: cold start auto-routes into the shell (no "Who's watching?").
+            // It is flipped to false ONLY when the user taps "Switch Profile" in the shell, which is
+            // the only time the picker appears — and it's PIN-gated on locked profiles by the picker.
+            var gatePassed by remember { mutableStateOf(true) }
             var addingProfile by remember { mutableStateOf(false) }
             // A backup restore deletes-then-reinserts profiles, so the list is briefly EMPTY while
             // the shell is showing — without this, the shell unmounts and remounts, dumping the user
             // out of Settings → Backup & Restore mid-restore. Only the cold start waits for the load.
             var everHadProfiles by remember { mutableStateOf(false) }
             LaunchedEffect(profiles) { if (profiles.isNotEmpty()) everHadProfiles = true }
-            val shouldShowProfileGate = profiles.size > 1 || profiles.singleOrNull()?.pinHash != null
+
+            // Cold-start default routing: exactly ONCE per process launch, force the active profile to
+            // the launch default. This guarantees a restart always returns to the default (e.g. Main)
+            // even if the app was closed while inside a switched-to, PIN-locked profile. The default is
+            // the chosen default profile if it's set and still UNLOCKED; otherwise the first unlocked
+            // profile; otherwise (no unlocked profile exists at all) the first profile.
+            var coldStartRouted by remember { mutableStateOf(false) }
+            LaunchedEffect(profiles, defaultProfileId) {
+                if (coldStartRouted || profiles.isEmpty()) return@LaunchedEffect
+                val chosen = profiles.firstOrNull { it.id == defaultProfileId && it.pinHash == null }
+                    ?: profiles.firstOrNull { it.pinHash == null }
+                    ?: profiles.first()
+                if (activeProfileId != chosen.id) viewModel.setActiveProfileId(chosen.id)
+                coldStartRouted = true
+            }
 
             // "Refresh on startup" — re-sync sources once the active profile is known.
             LaunchedEffect(activeProfileId) {
@@ -137,8 +155,10 @@ class MainActivity : ComponentActivity() {
                             )
                             // Profiles still loading (≥0 means at least one exists) — avoid a gate/shell flicker.
                             profiles.isEmpty() && !everHadProfiles -> Unit
-                            // Run 2+ (or a single locked profile): "Who's watching?" — choose a profile or add one.
-                            shouldShowProfileGate && !gatePassed -> ProfileGate(
+                            // Picker appears ONLY when the user tapped "Switch Profile" in the shell
+                            // (gatePassed flipped false). Cold start never lands here — it auto-routes
+                            // to the default below. Locked profiles are PIN-gated inside the picker.
+                            !gatePassed -> ProfileGate(
                                 onEnter = { gatePassed = true },
                                 onAddProfile = { addingProfile = true },
                                 modifier = Modifier.fillMaxSize(),
@@ -159,7 +179,8 @@ class MainActivity : ComponentActivity() {
                                 isOffline = !isOnline,
                                 onExitApp = { finish() },
                                 onSwitchProfile = {
-                                    // Stop playback and return to the "Who's watching?" gate — no app restart.
+                                    // Stop playback and show the profile picker (PIN-gated on locked
+                                    // profiles). Session-only: the next cold start returns to the default.
                                     player.onAppBackgrounded(); player.discardBackgroundRestore(); previewEngine.stop(); previewEngine.discardBackgroundRestore(); heroPreviewEngine.stop(); gatePassed = false
                                 },
                                 modifier = Modifier.fillMaxSize(),

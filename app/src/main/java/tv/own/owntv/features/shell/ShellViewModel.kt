@@ -145,6 +145,11 @@ class ShellViewModel(
         _selectedSection.value = section
     }
 
+    /** Force the active profile (used by the cold-start default router and in-app profile switch). */
+    fun setActiveProfileId(id: Long) {
+        viewModelScope.launch { settings.setActiveProfile(id) }
+    }
+
     fun setThemeMode(mode: ThemeMode) {
         viewModelScope.launch { settings.setThemeMode(mode) }
     }

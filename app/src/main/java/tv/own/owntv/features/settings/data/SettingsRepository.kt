@@ -39,6 +39,7 @@ class SettingsRepository(private val context: Context) {
         val ACCENT_CUSTOM = stringPreferencesKey("accent_custom")
         val AVATAR_ID = intPreferencesKey("avatar_id")
         val ACTIVE_PROFILE = longPreferencesKey("active_profile_id")
+        val DEFAULT_PROFILE = longPreferencesKey("default_profile_id")
         val DEFAULT_SOURCE = longPreferencesKey("default_source_id")
         val DOWNLOAD_ROOT = stringPreferencesKey("download_root")
         val REFRESH_SOURCE_IDS = stringSetPreferencesKey("refresh_source_ids")
@@ -375,6 +376,17 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun setActiveProfile(id: Long) {
         context.dataStore.edit { it[Keys.ACTIVE_PROFILE] = id }
+    }
+
+    /**
+     * The profile the app opens into on every cold start. -1 = not set (fall back to the first
+     * profile). Must always be an UNLOCKED (no-PIN) profile so launch never lands inside a locked
+     * profile; the picker UI enforces that, and the launch resolver double-checks it.
+     */
+    val defaultProfileId: Flow<Long> = context.dataStore.data.map { it[Keys.DEFAULT_PROFILE] ?: -1L }
+
+    suspend fun setDefaultProfile(id: Long) {
+        context.dataStore.edit { it[Keys.DEFAULT_PROFILE] = id }
     }
 
     // --- Backup / restore of pure UI/player preferences (device-agnostic) ---

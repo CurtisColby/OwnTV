@@ -51,6 +51,7 @@ import tv.own.owntv.ui.theme.OwnTVTheme
 fun ManageProfilesScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
     val vm: ProfilesViewModel = koinViewModel()
     val profiles by vm.profiles.collectAsStateWithLifecycle()
+    val defaultProfileId by vm.defaultProfileId.collectAsStateWithLifecycle()
     val colors = OwnTVTheme.colors
 
     var editing by remember { mutableStateOf<ProfileEntity?>(null) }
@@ -83,11 +84,20 @@ fun ManageProfilesScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
         }
         Spacer(Modifier.height(20.dp))
 
+        // Which profile launch will actually open into: the explicitly-set default if it's set and
+        // still unlocked, otherwise the first unlocked profile (the resolver's fallback). Shown so the
+        // user always sees the real landing profile, even before they pick one.
+        val effectiveDefaultId = profiles.firstOrNull { it.id == defaultProfileId && it.pinHash == null }?.id
+            ?: profiles.firstOrNull { it.pinHash == null }?.id
+
         LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             items(profiles, key = { it.id }) { p ->
                 ProfileRow(
                     profile = p,
                     canDelete = profiles.size > 1,
+                    isDefault = p.id == effectiveDefaultId,
+                    canBeDefault = p.pinHash == null,
+                    onMakeDefault = { vm.setDefaultProfile(p) },
                     onEdit = { editing = p },
                     onDelete = { confirmDelete = p },
                 )
@@ -120,7 +130,15 @@ fun ManageProfilesScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun ProfileRow(profile: ProfileEntity, canDelete: Boolean, onEdit: () -> Unit, onDelete: () -> Unit) {
+private fun ProfileRow(
+    profile: ProfileEntity,
+    canDelete: Boolean,
+    isDefault: Boolean,
+    canBeDefault: Boolean,
+    onMakeDefault: () -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+) {
     val colors = OwnTVTheme.colors
     Row(
         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(colors.surfaceContainerHigh).padding(14.dp),
@@ -131,6 +149,7 @@ private fun ProfileRow(profile: ProfileEntity, canDelete: Boolean, onEdit: () ->
         Column(Modifier.weight(1f)) {
             Text(profile.name, style = MaterialTheme.typography.titleMedium, color = colors.onSurface)
             val tags = buildList {
+                if (isDefault) add("Default — opens on launch")
                 if (profile.isKids) add("Kids")
                 if (profile.pinHash != null) add("PIN locked")
             }
@@ -139,6 +158,18 @@ private fun ProfileRow(profile: ProfileEntity, canDelete: Boolean, onEdit: () ->
             }
         }
         Spacer(Modifier.width(12.dp))
+        // An UNLOCKED, non-default profile can be made the launch default. The current default shows a
+        // static "Default" marker. Locked profiles show nothing here (they can't be the default).
+        when {
+            isDefault -> {
+                OwnTVButton("Default", onClick = {}, style = OwnTVButtonStyle.PRIMARY)
+                Spacer(Modifier.width(10.dp))
+            }
+            canBeDefault -> {
+                OwnTVButton("Make Default", onClick = onMakeDefault, style = OwnTVButtonStyle.SECONDARY)
+                Spacer(Modifier.width(10.dp))
+            }
+        }
         OwnTVButton("Edit", onClick = onEdit, style = OwnTVButtonStyle.SECONDARY)
         if (canDelete) {
             Spacer(Modifier.width(10.dp))
