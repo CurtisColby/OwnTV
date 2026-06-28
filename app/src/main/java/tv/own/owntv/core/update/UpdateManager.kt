@@ -139,6 +139,6 @@ class UpdateManager(
     }
 
     companion object {
-        const val REPO = "ahXN00/OwnTV"
+        const val REPO = "CurtisColby/OwnTV"
     }
 }

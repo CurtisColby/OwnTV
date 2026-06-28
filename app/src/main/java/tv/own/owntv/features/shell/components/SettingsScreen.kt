@@ -604,7 +604,7 @@ private fun Swatch(
     }
 }
 
-private const val GITHUB_REPO = "github.com/ahXN00/OwnTV"
+private const val GITHUB_REPO = "github.com/CurtisColby/OwnTV"
 private const val TELEGRAM_LINK = "t.me/owntvplayer"
 
 /** About OwnTV: version, license, author and project link — all readable on screen (no TV browser). */
