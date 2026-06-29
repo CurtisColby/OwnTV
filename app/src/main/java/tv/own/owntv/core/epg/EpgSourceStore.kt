@@ -18,6 +18,7 @@ data class EpgSource(
     val id: Long,            // synthetic, always negative so it never collides with a Room source id
     val name: String,
     val url: String,
+    val profileId: Long = -1L, // owning profile; -1 = legacy/unowned (hidden from every profile under strict scoping)
     val userAgent: String? = null,
     val lastSyncAt: Long? = null,
     val lastError: String? = null,
@@ -31,6 +32,11 @@ private val Context.epgStore: DataStore<Preferences> by preferencesDataStore(nam
  * parsed guide still lands in the existing epg_channels / epg_programmes tables, keyed by each EPG
  * source's negative [EpgSource.id]; the guide query simply includes those ids alongside the playlist
  * ids, so channels match guide entries from any feed by their EPG id.
+ *
+ * Each source is OWNED by a profile via [EpgSource.profileId]. Reads are scoped per profile so two
+ * profiles' feeds can never collapse into one slot or bleed across a profile switch. A profileId of
+ * -1 means "legacy/unowned" — it belongs to no profile under strict scoping and is therefore invisible
+ * to every profile (the user re-adds feeds once under each profile, after which they're locked in).
  */
 class EpgSourceStore(private val context: Context) {
 
@@ -40,20 +46,44 @@ class EpgSourceStore(private val context: Context) {
         val MIGRATED = longPreferencesKey("migrated_v1")
     }
 
+    /** ALL sources, every profile. Use only where a genuine app-wide view is needed. */
     val sources: Flow<List<EpgSource>> = context.epgStore.data.map { prefs ->
         parse(prefs[Keys.LIST])
     }
 
+    /** Only the given profile's sources (strict: profileId must match exactly). */
+    fun sourcesForProfile(profileId: Long): Flow<List<EpgSource>> = context.epgStore.data.map { prefs ->
+        parse(prefs[Keys.LIST]).filter { it.profileId == profileId }
+    }
+
     suspend fun getAll(): List<EpgSource> = parse(context.epgStore.data.first()[Keys.LIST])
 
-    suspend fun add(name: String, url: String, userAgent: String? = null): EpgSource {
+    /** Only the given profile's sources (strict: profileId must match exactly). */
+    suspend fun getForProfile(profileId: Long): List<EpgSource> =
+        parse(context.epgStore.data.first()[Keys.LIST]).filter { it.profileId == profileId }
+
+    suspend fun add(name: String, url: String, profileId: Long, userAgent: String? = null): EpgSource {
         var created: EpgSource? = null
         context.epgStore.edit { prefs ->
+            val existing = parse(prefs[Keys.LIST])
+            // Per-(profile,url) dedup: same URL under a DIFFERENT profile is a distinct row and must
+            // never overwrite the other profile's feed. Same URL under the SAME profile reuses the row.
+            val match = existing.firstOrNull { it.profileId == profileId && it.url == url.trim() }
+            if (match != null) {
+                created = match
+                return@edit
+            }
             val id = (prefs[Keys.NEXT_ID] ?: -1L)
             prefs[Keys.NEXT_ID] = id - 1
-            val source = EpgSource(id = id, name = name.trim().ifBlank { "EPG" }, url = url.trim(), userAgent = userAgent?.trim()?.takeIf { it.isNotBlank() })
+            val source = EpgSource(
+                id = id,
+                name = name.trim().ifBlank { "EPG" },
+                url = url.trim(),
+                profileId = profileId,
+                userAgent = userAgent?.trim()?.takeIf { it.isNotBlank() },
+            )
             created = source
-            prefs[Keys.LIST] = write(parse(prefs[Keys.LIST]) + source)
+            prefs[Keys.LIST] = write(existing + source)
         }
         return created!!
     }
@@ -104,6 +134,7 @@ class EpgSourceStore(private val context: Context) {
                     id = o.getLong("id"),
                     name = o.getString("name"),
                     url = o.getString("url"),
+                    profileId = if (o.has("pid")) o.getLong("pid") else -1L, // legacy rows → -1 (unowned)
                     userAgent = o.optString("ua").takeIf { it.isNotEmpty() },
                     lastSyncAt = if (o.has("at")) o.getLong("at") else null,
                     lastError = o.optString("err").takeIf { it.isNotEmpty() },
@@ -117,7 +148,7 @@ class EpgSourceStore(private val context: Context) {
         list.forEach { s ->
             arr.put(
                 JSONObject()
-                    .put("id", s.id).put("name", s.name).put("url", s.url)
+                    .put("id", s.id).put("name", s.name).put("url", s.url).put("pid", s.profileId)
                     .apply {
                         s.userAgent?.let { put("ua", it) }
                         s.lastSyncAt?.let { put("at", it) }

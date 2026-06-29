@@ -59,7 +59,11 @@ class SettingsViewModel(
 
     fun syncPendingEpg() {
         val src = pendingEpgSource ?: return
-        viewModelScope.launch { runSemiAutoEpgSync(src, epgRepository, epgSourceStore) { _epgSync.value = it } }
+        viewModelScope.launch {
+            val pid = settings.activeProfileId.first()
+            if (pid < 0) { _epgSync.value = EpgSyncUi.Done; return@launch }
+            runSemiAutoEpgSync(src, pid, epgRepository, epgSourceStore) { _epgSync.value = it }
+        }
     }
 
     /** Skip (from the prompt) or acknowledge (after Done) — either way, close the EPG flow. */

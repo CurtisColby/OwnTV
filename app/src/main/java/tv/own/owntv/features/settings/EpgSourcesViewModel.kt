@@ -1,3 +1,5 @@
+@file:OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+
 package tv.own.owntv.features.settings
 
 import androidx.lifecycle.ViewModel
@@ -7,6 +9,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import tv.own.owntv.core.epg.EpgSource
@@ -39,13 +42,19 @@ class EpgSourcesViewModel(
     data class PlaylistEpg(val name: String, val url: String)
 
     val sources: StateFlow<List<EpgSource>> =
-        store.sources.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+        settings.activeProfileId
+            .flatMapLatest { pid -> if (pid < 0) kotlinx.coroutines.flow.flowOf(emptyList()) else store.sourcesForProfile(pid) }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     private val _sync = MutableStateFlow<SyncState>(SyncState.Idle)
     val sync: StateFlow<SyncState> = _sync.asStateFlow()
 
     fun add(name: String, url: String, userAgent: String? = null) {
-        viewModelScope.launch { sync(store.add(name, url, userAgent)) }
+        viewModelScope.launch {
+            val pid = settings.activeProfileId.first()
+            if (pid < 0) { _sync.value = SyncState.Failed("No active profile"); return@launch }
+            sync(store.add(name, url, pid, userAgent))
+        }
     }
 
     fun resync(source: EpgSource) {

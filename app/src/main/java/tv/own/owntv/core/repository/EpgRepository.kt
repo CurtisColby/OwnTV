@@ -211,7 +211,12 @@ class EpgRepository(
     }
 
     /** Drop a removed EPG source's stored programmes. */
-    suspend fun clear(storeId: Long) = withContext(Dispatchers.IO) { epgDao.clearSource(storeId) }
+    suspend fun clear(storeId: Long) = withContext(Dispatchers.IO) {
+        epgDao.clearSource(storeId)
+        // Also drop the on-disk XMLTV cache so a deleted feed leaves nothing stale behind for a
+        // future feed to read (orphaned epg_<id>.xmltv files were a real cross-profile hazard).
+        runCatching { cacheFile(storeId).delete() }
+    }
 
     companion object {
         // Keep up to ~7 days of just-aired programmes so the Guide can browse a long catch-up archive

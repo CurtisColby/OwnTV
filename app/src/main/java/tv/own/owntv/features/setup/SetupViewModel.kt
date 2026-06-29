@@ -51,7 +51,11 @@ class SetupViewModel(
     fun syncPendingEpg() {
         val src = pendingEpgSource ?: return
         viewModelScope.launch {
-            tv.own.owntv.features.settings.runSemiAutoEpgSync(src, epgRepository, epgSourceStore) { _epgSync.value = it }
+            // Own the feed by the profile this onboarding just created (the one the import attached
+            // content to); fall back to the active profile if for some reason it's unset.
+            val pid = createdProfileId.takeIf { it > 0 } ?: settings.activeProfileId.first()
+            if (pid < 0) { _epgSync.value = tv.own.owntv.features.settings.EpgSyncUi.Done; return@launch }
+            tv.own.owntv.features.settings.runSemiAutoEpgSync(src, pid, epgRepository, epgSourceStore) { _epgSync.value = it }
         }
     }
 

@@ -21,7 +21,11 @@ class EpgMigration(
                 val url = epgRepository.guideUrl(src) ?: continue
                 if (url in existingUrls) continue
                 existingUrls += url
-                val epg = store.add("${src.name} EPG", url, src.userAgent)
+                // Legacy migration: tag as -1 (unowned). Under strict per-profile scoping these are
+                // invisible to every profile; the user re-adds feeds once per profile (which stamps
+                // ownership via the semi-auto sync path). This avoids guessing which profile a
+                // pre-existing global feed "belonged" to.
+                val epg = store.add("${src.name} EPG", url, -1L, src.userAgent)
                 val now = System.currentTimeMillis()
                 runCatching { epgRepository.refreshUrl(epg.id, epg.url, epg.userAgent) }
                     .onSuccess { store.setSynced(epg.id, now, null) }

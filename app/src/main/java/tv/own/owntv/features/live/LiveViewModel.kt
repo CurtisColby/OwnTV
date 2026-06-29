@@ -248,8 +248,8 @@ class LiveViewModel(
 
     /** Distinct EPG channels for the "Match EPG" picker (across the profile's playlists + EPG feeds). */
     suspend fun availableEpgChannels(query: String): List<tv.own.owntv.core.database.entity.EpgChannelEntity> {
-        if (currentProfileId() == null) return emptyList()
-        val ids = ctx.value.sourceIds + epgSourceStore.getAll().map { it.id }
+        val pid = currentProfileId() ?: return emptyList()
+        val ids = ctx.value.sourceIds + epgSourceStore.getForProfile(pid).map { it.id }
         if (ids.isEmpty()) return emptyList()
         return epgDao.listEpgChannels(ids, query.trim().lowercase(), 300)
     }
@@ -546,7 +546,7 @@ class LiveViewModel(
             ?.trim()?.lowercase()?.takeIf { it.isNotEmpty() } ?: return@withContext emptyList()
         val now = System.currentTimeMillis()
         val windowMs = (ch.catchupDays.coerceAtLeast(1) * 24L * 60 * 60 * 1000).coerceAtMost(CATCHUP_LOOKBACK_CAP_MS)
-        val ids = ctx.value.sourceIds + epgSourceStore.getAll().map { it.id }
+        val ids = ctx.value.sourceIds + epgSourceStore.getForProfile(ctx.value.profileId).map { it.id }
         epgDao.programmesForChannel(ids, epgKey, now - windowMs, now + 60 * 60 * 1000)
             .filter { it.startMs <= now }          // already started → catch-up applies
             .sortedByDescending { it.startMs }      // most recent first
