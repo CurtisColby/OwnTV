@@ -192,6 +192,26 @@ class EpgViewModel(
         _state.value = EpgUiState(loading = true)
     }
 
+    /**
+     * The EPG source ids that belong to the ACTIVE PROFILE — not the whole global EPG store.
+     *
+     * The EpgSourceStore is global (app-wide, keyed by URL): when two profiles each carry their own
+     * guide (profileA.m3u advertises profileA.xml, profileB.m3u advertises profileB.xml), BOTH feeds
+     * live in that one shared list. Building the guide from epgSourceStore.getAll() therefore matched
+     * every profile against every feed, so switching profiles bled one profile's guide into the other
+     * (the "swap"). Here we keep only the global EPG entries whose URL is one this profile's own
+     * playlists point at (via each source's url-tvg → EpgRepository.guideUrl). So each profile's guide
+     * only ever matches its own feed, regardless of what else is in the global store.
+     *
+     * [profileSources] is the active profile's playlists (already fetched by the caller, to avoid a
+     * second DB round-trip).
+     */
+    private suspend fun profileEpgSourceIds(profileSources: List<tv.own.owntv.core.database.entity.SourceEntity>): List<Long> {
+        val wantedUrls = profileSources.mapNotNull { epgRepository.guideUrl(it) }.toHashSet()
+        if (wantedUrls.isEmpty()) return emptyList()
+        return epgSourceStore.getAll().filter { it.url in wantedUrls }.map { it.id }
+    }
+
     /** The Guide's current sort, for the header button. */
     val sortGuide: StateFlow<SettingsRepository.GuideSort> = settings.sortGuide
         .stateIn(viewModelScope, SharingStarted.Eagerly, SettingsRepository.GuideSort.LIVE_TV)
@@ -374,9 +394,10 @@ class EpgViewModel(
             _matching.value = true
             try {
                 val pid = settings.activeProfileId.first()
-                val playlistIds = if (pid < 0) emptyList() else sourceRepository.observeSources(pid).first().map { it.id }
+                val profileSources = if (pid < 0) emptyList() else sourceRepository.observeSources(pid).first()
+                val playlistIds = profileSources.map { it.id }
                 if (playlistIds.isEmpty()) { _matchSummary.value = "Add a playlist first."; return@launch }
-                val ids = playlistIds + epgSourceStore.getAll().map { it.id }
+                val ids = playlistIds + profileEpgSourceIds(profileSources)
                 val cust = customize.observe(pid, MediaType.LIVE).first()
 
                 val candidates = epgDao.listEpgChannels(ids, "", MAX_EPG_CANDIDATES)
@@ -432,8 +453,9 @@ class EpgViewModel(
             _matching.value = true
             try {
                 val pid = settings.activeProfileId.first()
-                val playlistIds = if (pid < 0) emptyList() else sourceRepository.observeSources(pid).first().map { it.id }
-                val ids = playlistIds + epgSourceStore.getAll().map { it.id }
+                val profileSources = if (pid < 0) emptyList() else sourceRepository.observeSources(pid).first()
+                val playlistIds = profileSources.map { it.id }
+                val ids = playlistIds + profileEpgSourceIds(profileSources)
                 val candidates = epgDao.listEpgChannels(ids, "", MAX_EPG_CANDIDATES)
                 if (candidates.isEmpty()) { _matchSummary.value = "No EPG data to match against yet."; return@launch }
                 val best = withContext(kotlinx.coroutines.Dispatchers.Default) {
@@ -515,11 +537,14 @@ class EpgViewModel(
                 )
                 return@launch
             }
-            val playlistIds = sourceRepository.observeSources(pid).first().map { it.id }
-            val epgIds = epgSourceStore.getAll().map { it.id }
-            // Channels come from the playlists; guide data is matched from BOTH the playlists' own EPG
-            // (kept for compatibility) and the standalone EPG sources — by epgChannelId across all ids.
+            val profileSources = sourceRepository.observeSources(pid).first()
+            val playlistIds = profileSources.map { it.id }
+            // Guide data is matched from BOTH the playlists' own EPG and the standalone EPG sources —
+            // but ONLY the EPG feeds this profile's own playlists point at, so a sibling profile's guide
+            // (sharing the global EpgSourceStore) can't bleed in on a switch. Match by epgChannelId.
+            val epgIds = profileEpgSourceIds(profileSources)
             val ids = playlistIds + epgIds
+
 
             if (playlistIds.isEmpty()) {
                 _state.value = EpgUiState(loading = false, message = "Add a playlist to see the guide.")
@@ -677,8 +702,9 @@ class EpgViewModel(
     /** Distinct EPG channels for the manual "Match EPG" picker (across the profile's feeds). */
     suspend fun availableEpgChannels(query: String): List<tv.own.owntv.core.database.entity.EpgChannelEntity> {
         val pid = currentProfileId() ?: return emptyList()
-        val playlistIds = sourceRepository.observeSources(pid).first().map { it.id }
-        val ids = playlistIds + epgSourceStore.getAll().map { it.id }
+        val profileSources = sourceRepository.observeSources(pid).first()
+        val playlistIds = profileSources.map { it.id }
+        val ids = playlistIds + profileEpgSourceIds(profileSources)
         if (ids.isEmpty()) return emptyList()
         return epgDao.listEpgChannels(ids, query.trim().lowercase(), 300)
     }
