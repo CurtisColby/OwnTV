@@ -160,7 +160,7 @@ class EpgViewModel(
             .distinctUntilChanged()
             .onEach { if (settings.sortGuide.first() == SettingsRepository.GuideSort.LIVE_TV) load() }
             .launchIn(viewModelScope)
-            // Rebuild the guide when the ACTIVE PROFILE changes. The EpgViewModel is shared across the
+        // Rebuild the guide when the ACTIVE PROFILE changes. The EpgViewModel is shared across the
         // app's lifetime, so without this the guide keeps whichever profile's channels it first built
         // and a switch shows the previous profile's lineup (whose EPG ids don't match the now-active
         // profile's stored programmes — the "channel ids don't match" message). drop(1): the screen
@@ -190,8 +190,6 @@ class EpgViewModel(
         cachedWindow = null
         lastStored = -1
         _state.value = EpgUiState(loading = true)
-    }
-            .launchIn(viewModelScope)
     }
 
     /** The Guide's current sort, for the header button. */
