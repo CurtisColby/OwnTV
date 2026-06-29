@@ -160,6 +160,38 @@ class EpgViewModel(
             .distinctUntilChanged()
             .onEach { if (settings.sortGuide.first() == SettingsRepository.GuideSort.LIVE_TV) load() }
             .launchIn(viewModelScope)
+            // Rebuild the guide when the ACTIVE PROFILE changes. The EpgViewModel is shared across the
+        // app's lifetime, so without this the guide keeps whichever profile's channels it first built
+        // and a switch shows the previous profile's lineup (whose EPG ids don't match the now-active
+        // profile's stored programmes — the "channel ids don't match" message). drop(1): the screen
+        // does the first load itself; we only react to genuine SWITCHES. resetGuideState() wipes the
+        // cached list BEFORE load() runs so the other profile's channels never bleed through, not even
+        // for a frame — the empty/loading state shows in the gap instead of stale rows.
+        settings.activeProfileId
+            .drop(1)
+            .distinctUntilChanged()
+            .onEach {
+                resetGuideState()
+                load()
+            }
+            .launchIn(viewModelScope)
+    }
+
+    /**
+     * Clears all cached guide state so the next [load] rebuilds from scratch for the current profile.
+     * Called on profile switch BEFORE reloading, which is what guarantees no channels from the previous
+     * profile remain on screen during the rebuild. Sets the UI to a clean loading state (empty channel
+     * list) rather than keeping the shared view model's "instant reopen" list, which would belong to the
+     * old profile.
+     */
+    private fun resetGuideState() {
+        rowCache.clear()
+        loadedSourceIds = emptyList()
+        cachedWindow = null
+        lastStored = -1
+        _state.value = EpgUiState(loading = true)
+    }
+            .launchIn(viewModelScope)
     }
 
     /** The Guide's current sort, for the header button. */
