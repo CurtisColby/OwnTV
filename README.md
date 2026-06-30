@@ -23,6 +23,31 @@
 </p>
 
 ---
+> ## 🌊 About this fork — SurfTV
+>
+> This is a **modified fork of [OwnTV](https://github.com/ahXN00/OwnTV)**, customized to serve as the
+> client for **SurfTV** — a self-hosted, pseudo-linear TV system that turns a personal Plex library into
+> surfable, channel-style live TV. The upstream OwnTV project is a general-purpose IPTV player; this fork
+> adapts it specifically for the SurfTV backend and home setup.
+>
+> **What's changed in this fork**
+> - **Mid-show join** — tuning into a channel drops you into the program already in progress, like real TV,
+>   instead of starting it from the beginning.
+> - **Per-profile EPG sources** — each profile sees only its own assigned channels and guide, with strict
+>   partitioning (no shared fallback).
+> - **In-app updates from GitHub Releases** — the client checks this repo's releases and updates itself,
+>   no sideloading required after the first install.
+> - Ongoing UI, playback, and reliability tuning specific to the SurfTV experience.
+>
+> **What's still coming**
+> - EPG visual pass — guide layout refinements, focus fixes, and more reliable channel surfing.
+> - VOD (on-demand) pages and "surf all the time" browsing.
+> - A native Music page and pseudo-radio.
+> - Audio leveling across channels.
+>
+> SurfTV is a personal/household project and is **not affiliated with or endorsed by** the upstream OwnTV
+> project. All credit for the original player goes to its authors. This fork retains OwnTV's MIT license.
+
 
 OwnTV is a native **Android TV** IPTV **player** built with Kotlin, Jetpack Compose for TV, and a
 **dual playback engine** — **libmpv (FFmpeg)** for movies/series and maximum compatibility, **ExoPlayer
