@@ -1,4 +1,14 @@
 # Changelog
+## v4.0.1 — 2026-06-30
+
+Documentation + release-pipeline release. No functional app changes — this build exists to verify that
+in-app updates from GitHub Releases install correctly over a prior version (no more manual sideloading).
+
+### 📝 Changed
+- **README** now explains that this is a SurfTV-specific fork of OwnTV, with a summary of what's changed
+  and what's still on the roadmap.
+- First signed release cut from the project's permanent signing key, enabling self-updating clients.
+
 
 ## v4.0.0 — 2026-06-25
 
