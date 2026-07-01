@@ -10,7 +10,6 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.Constraints
-import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -52,6 +51,7 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -157,15 +157,20 @@ fun EpgScreen(
         onRestored()
     }
 
-    // With a catch-up backward window the guide spans past→future; open it scrolled to "now" so the
-    // current programmes are what you see first (past sits to the left, reachable with D-pad Left).
+    // Width (px) of the scrolling programme area, reported by the first row once it's laid out. Used
+    // to land "now" one-third of the way across the viewport on open, matching a real cable guide's
+    // fixed "now" landmark instead of pinning it to the left edge.
+    var viewportWidthPx by remember { mutableStateOf(0f) }
+
+    // Open the guide scrolled so "now" sits a third of the way in from the left — a little history
+    // stays visible to the left, the rest of the window is ahead to the right.
     val density = LocalDensity.current
-    LaunchedEffect(state.windowStart, state.channels.isNotEmpty()) {
-        if (state.channels.isEmpty()) return@LaunchedEffect
+    LaunchedEffect(state.windowStart, state.channels.isNotEmpty(), viewportWidthPx) {
+        if (state.channels.isEmpty() || viewportWidthPx <= 0f) return@LaunchedEffect
         val minutesBack = ((state.now - state.windowStart) / 60_000L).toInt()
-        if (minutesBack <= SLOT_MIN) return@LaunchedEffect // no real lookback → leave at the start
-        val px = with(density) { (minutesBack * PX_PER_MIN.value).dp.toPx() }.toInt()
-        runCatching { hScroll.scrollTo(px) }
+        val nowPx = with(density) { (minutesBack * PX_PER_MIN.value).dp.toPx() }
+        val target = (nowPx - viewportWidthPx / 3f).toInt().coerceAtLeast(0)
+        runCatching { hScroll.scrollTo(target) }
     }
 
     // In CELL mode, Back steps out to whole-row (ROW) selection instead of leaving the guide.
@@ -322,6 +327,7 @@ fun EpgScreen(
                             windowEnd = state.windowEnd,
                             now = state.now,
                             hScroll = hScroll,
+                            onViewportWidth = { viewportWidthPx = it },
                             labelFocus = when {
                                 channel.id == restoreChannelId -> restoreCell
                                 channel.id == vm.lastTunedChannelId -> tunedCell
@@ -521,6 +527,7 @@ private fun GuideChannelRow(
     windowEnd: Long,
     now: Long,
     hScroll: androidx.compose.foundation.ScrollState,
+    onViewportWidth: (Float) -> Unit,
     labelFocus: FocusRequester?,
     onTune: () -> Unit,
     onOpen: (EpgProgrammeEntity) -> Unit,
@@ -573,6 +580,7 @@ private fun GuideChannelRow(
             modifier = Modifier.weight(1f).height(ROW_HEIGHT)
                 .focusRequester(stripFR)
                 .onFocusChanged { stripFocused = it.isFocused }
+                .onSizeChanged { onViewportWidth(it.width.toFloat()) }
                 .onKeyEvent { e ->
                     if (e.type != KeyEventType.KeyDown) return@onKeyEvent false
                     val progs = programmes
@@ -590,7 +598,10 @@ private fun GuideChannelRow(
                 }
                 .focusable()
                 .clip(RoundedCornerShape(10.dp))
-                .then(if (rowSelected) Modifier.border(Dimens.FocusBorderWidth, colors.focusBorder, RoundedCornerShape(10.dp)) else Modifier),
+                // A soft full-row tint marks "you're on this row, OK to browse" — deliberately NOT an
+                // outline wrapping every visible cell, which used to read as "the whole schedule is
+                // selected" instead of showing what's actually airing now.
+                .then(if (rowSelected) Modifier.background(colors.surfaceContainerHigh.copy(alpha = 0.4f), RoundedCornerShape(10.dp)) else Modifier),
         ) {
             programmes?.let { progs ->
                 ProgrammeStripCanvas(
@@ -657,6 +668,16 @@ private fun ProgrammeStripCanvas(
     val titleNowStyle = MaterialTheme.typography.titleSmall.copy(color = colors.onPrimaryContainer)
     val timeStyle = MaterialTheme.typography.labelSmall.copy(color = colors.onSurfaceVariant)
     val timeNowStyle = MaterialTheme.typography.labelSmall.copy(color = colors.onPrimaryContainer)
+    // Dimmed styles for programmes that have already finished — left of the "now" line reads calmer,
+    // right of it (current + upcoming) stays at full brightness. Matches a real cable guide's look.
+    val titleStyleDim = MaterialTheme.typography.titleSmall.copy(color = colors.onSurface.copy(alpha = 0.45f))
+    val timeStyleDim = MaterialTheme.typography.labelSmall.copy(color = colors.onSurfaceVariant.copy(alpha = 0.45f))
+    val bgDim = colors.surfaceContainerHigh.copy(alpha = 0.5f)
+    val nowLineColor = colors.primary
+    // Which programme is actually airing right now — computed ONCE per row rather than re-checked
+    // per cell in the draw loop, so exactly one cell (never several) ever gets the "now" treatment
+    // even if the schedule has any overlapping entries.
+    val nowIndex = remember(programmes, now) { programmes.indexOfFirst { now in it.startMs until it.stopMs } }
     // Time labels built once (string formatting kept out of the per-frame draw loop).
     val labels = remember(programmes, now) {
         programmes.map { p ->
@@ -676,21 +697,29 @@ private fun ProgrammeStripCanvas(
             val x = ((s - windowStart) / 60_000f) * pxPerMin - scrollPx
             val w = (((e - s) / 60_000f) * pxPerMin - gapPx).coerceAtLeast(0f)
             if (x + w <= 0f || x >= viewW) return@forEachIndexed // cull off-screen programmes
-            val isNow = now in p.startMs until p.stopMs
+            val isNowProg = i == nowIndex
+            val isPast = p.stopMs <= now
             val hi = highlightTime != null && highlightTime in p.startMs until p.stopMs
-            val bg = when { hi -> colors.card; isNow -> colors.primaryContainer; else -> colors.surfaceContainerHigh }
+            val bg = when { hi -> colors.card; isNowProg -> colors.primaryContainer; isPast -> bgDim; else -> colors.surfaceContainerHigh }
             drawRoundRect(color = bg, topLeft = Offset(x, 0f), size = Size(w, h), cornerRadius = corner)
             if (hi) drawRoundRect(color = colors.focusBorder, topLeft = Offset(x, 0f), size = Size(w, h), cornerRadius = corner, style = Stroke(borderPx))
             val textW = (w - padPx * 2f).toInt()
             if (textW > 8) {
-                val tStyle = if (isNow && !hi) titleNowStyle else titleStyle
-                val mStyle = if (isNow && !hi) timeNowStyle else timeStyle
+                val tStyle = when { hi -> titleStyle; isNowProg -> titleNowStyle; isPast -> titleStyleDim; else -> titleStyle }
+                val mStyle = when { hi -> timeStyle; isNowProg -> timeNowStyle; isPast -> timeStyleDim; else -> timeStyle }
                 val title = measurer.measure(p.title, tStyle, overflow = TextOverflow.Ellipsis, maxLines = 1, constraints = Constraints(maxWidth = textW))
                 val time = measurer.measure(labels[i], mStyle, overflow = TextOverflow.Ellipsis, maxLines = 1, constraints = Constraints(maxWidth = textW))
                 val top = (h - (title.size.height + time.size.height + 2)) / 2f
                 drawText(title, topLeft = Offset(x + padPx, top))
                 drawText(time, topLeft = Offset(x + padPx, top + title.size.height + 2))
             }
+        }
+        // "Now" line — a fixed landmark at the real current time, drawn on top of the cells. On open
+        // the guide scrolls so this sits a third of the way across; scrolling further into the future
+        // moves it left (and eventually off-screen), same as it would recede on a real cable guide.
+        val nowX = ((now - windowStart) / 60_000f) * pxPerMin - scrollPx
+        if (nowX >= -2f && nowX <= viewW + 2f) {
+            drawLine(color = nowLineColor, start = Offset(nowX, 0f), end = Offset(nowX, h), strokeWidth = 2.dp.toPx())
         }
     }
 }
