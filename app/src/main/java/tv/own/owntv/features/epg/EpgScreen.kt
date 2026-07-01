@@ -10,6 +10,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.Constraints
+import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -79,7 +80,7 @@ import java.util.Date
 import java.util.Locale
 
 private val CHANNEL_COL = 176.dp
-private val ROW_HEIGHT = 64.dp
+private val ROW_HEIGHT = 52.dp
 private val PX_PER_MIN = 4.dp
 private const val SLOT_MIN = 30
 
@@ -162,14 +163,14 @@ fun EpgScreen(
     // fixed "now" landmark instead of pinning it to the left edge.
     var viewportWidthPx by remember { mutableStateOf(0f) }
 
-    // Open the guide scrolled so "now" sits a third of the way in from the left — a little history
-    // stays visible to the left, the rest of the window is ahead to the right.
+    // Open the guide scrolled so "now" sits a quarter of the way in from the left — a little history
+    // stays visible to the left, the rest of the window is ahead to the right (matches TiViMate).
     val density = LocalDensity.current
     LaunchedEffect(state.windowStart, state.channels.isNotEmpty(), viewportWidthPx) {
         if (state.channels.isEmpty() || viewportWidthPx <= 0f) return@LaunchedEffect
         val minutesBack = ((state.now - state.windowStart) / 60_000L).toInt()
         val nowPx = with(density) { (minutesBack * PX_PER_MIN.value).dp.toPx() }
-        val target = (nowPx - viewportWidthPx / 3f).toInt().coerceAtLeast(0)
+        val target = (nowPx - viewportWidthPx / 4f).toInt().coerceAtLeast(0)
         runCatching { hScroll.scrollTo(target) }
     }
 
@@ -598,10 +599,16 @@ private fun GuideChannelRow(
                 }
                 .focusable()
                 .clip(RoundedCornerShape(10.dp))
-                // A soft full-row tint marks "you're on this row, OK to browse" — deliberately NOT an
-                // outline wrapping every visible cell, which used to read as "the whole schedule is
-                // selected" instead of showing what's actually airing now.
-                .then(if (rowSelected) Modifier.background(colors.surfaceContainerHigh.copy(alpha = 0.4f), RoundedCornerShape(10.dp)) else Modifier),
+                // Focused-row indicator: a clear accent border + soft tint so it's obvious which row
+                // you're on and that it's live (press OK to browse programmes). This is a single outline
+                // around the whole strip — deliberately NOT a bright treatment on every cell, which used
+                // to read as "the entire schedule is selected" instead of "this row is focused".
+                .then(
+                    if (rowSelected) Modifier
+                        .background(colors.primary.copy(alpha = 0.12f), RoundedCornerShape(10.dp))
+                        .border(Dimens.FocusBorderWidth, colors.focusBorder, RoundedCornerShape(10.dp))
+                    else Modifier
+                ),
         ) {
             programmes?.let { progs ->
                 ProgrammeStripCanvas(
