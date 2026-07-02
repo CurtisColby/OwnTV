@@ -92,6 +92,16 @@ fun PlayerHud(
     val buffering by player.buffering.collectAsStateWithLifecycle()
     val error by player.error.collectAsStateWithLifecycle()
     val errorInfo by player.errorInfo.collectAsStateWithLifecycle()
+    // Debounced error for the UI: engine errors that self-heal within the grace period — the
+    // ExoPlayer→mpv fallback handoff on channels ExoPlayer can't open, a brief live reconnect —
+    // never flash "Playback error" at the user; the buffering spinner covers the gap instead.
+    // Errors that PERSIST past the grace period (a genuinely dead channel) surface exactly as before.
+    var shownError by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(error) {
+        if (error == null) { shownError = null; return@LaunchedEffect }
+        delay(1_500)
+        shownError = error
+    }
     val nav by player.nav.collectAsStateWithLifecycle()
     val volume by player.volume.collectAsStateWithLifecycle()
     val videoRes by player.videoRes.collectAsStateWithLifecycle()
@@ -110,7 +120,7 @@ fun PlayerHud(
     var controlsVisible by remember { mutableStateOf(true) }
     var showInfo by remember { mutableStateOf(false) } // stream technical-info overlay
     var wakeTick by remember { mutableIntStateOf(0) }
-    val forceShow = error != null || dialog != HudDialog.NONE
+    val forceShow = shownError != null || dialog != HudDialog.NONE
     // First Back hides the controls (instead of leaving the channel); with the controls already hidden
     // this handler is disabled, so Back falls through to the shell, which exits the player. Also disabled
     // while an error/dialog is up (a dialog handles its own Back; an error should exit).
@@ -126,9 +136,9 @@ fun PlayerHud(
     LaunchedEffect(controlsVisible, wakeTick, forceShow) {
         if (controlsVisible && !forceShow) { delay(4500); controlsVisible = false }
     }
-    LaunchedEffect(controlsVisible, error) {
+    LaunchedEffect(controlsVisible, shownError) {
         if (controlsVisible) {
-            if (error != null) runCatching { retryFocus.requestFocus() } else runCatching { playFocus.requestFocus() }
+            if (shownError != null) runCatching { retryFocus.requestFocus() } else runCatching { playFocus.requestFocus() }
         } else runCatching { catchFocus.requestFocus() }
     }
 
@@ -180,7 +190,7 @@ fun PlayerHud(
 
             // Hide the transport (play/seek/prev/next) and bottom bar while an error is up — the error
             // overlay owns the screen with its own Retry, so the play/rewind/forward must not show behind it.
-            if (error == null) {
+            if (shownError == null) {
                 CenterControls(player, nav, isPlaying, isLive, onRewindLive, onForwardLive, onGoToLive, timeshiftOffsetSec, playFocus, modifier = Modifier.align(Alignment.Center))
 
                 BottomBar(
@@ -198,10 +208,10 @@ fun PlayerHud(
 
         // Status overlay (always shown).
         when {
-            error != null -> Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
+            shownError != null -> Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("Playback error", style = MaterialTheme.typography.titleLarge, color = Color.White)
                 Spacer(Modifier.height(8.dp))
-                Text(error ?: "", style = MaterialTheme.typography.bodyMedium, color = Color.White.copy(alpha = 0.7f), textAlign = TextAlign.Center)
+                Text(shownError ?: "", style = MaterialTheme.typography.bodyMedium, color = Color.White.copy(alpha = 0.7f), textAlign = TextAlign.Center)
                 // Structured technical detail so a user can report the real cause without adb/logcat:
                 // plain reason → media spec (codec • resolution • decoder) → raw engine/codec line.
                 errorInfo?.let { info ->

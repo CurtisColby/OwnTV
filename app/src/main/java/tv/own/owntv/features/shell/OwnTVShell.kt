@@ -139,6 +139,9 @@ fun OwnTVShell(
     // "Resume last channel on startup" (opt-in, default off): once when the shell first appears, if enabled
     // and nothing is playing, jump straight back into the last live channel watched. Reads the setting once
     // (via first()) so toggling it later in Settings never yanks the user into a channel.
+    // One-shot flag: backing OUT of a startup-resumed channel should land on the Guide (the surfing
+    // hub), not Home — Home is just where the shell happened to boot. Normal tunes are unaffected.
+    var startupResumeToGuide by remember { mutableStateOf(false) }
     val resumeSettings = koinInject<tv.own.owntv.features.settings.data.SettingsRepository>()
     LaunchedEffect(Unit) {
         if (playerMode != PlayerMode.NONE) return@LaunchedEffect
@@ -152,6 +155,7 @@ fun OwnTVShell(
                     // listOf(ch), which made CH+/CH− a dead end (zap needs 2+ channels to move).
                     liveVm.watchFullscreen(ch, liveVm.startupZapList(ch))
                     playerMode = PlayerMode.FULLSCREEN
+                    startupResumeToGuide = true
                 }
             }
             // Open straight to Live TV on the Favorites folder, with focus landing inside the channel list
@@ -191,6 +195,12 @@ fun OwnTVShell(
         showChannelList = false
         liveVm.onFullscreenExited() // no longer full-screen on ExoPlayer → let the preview re-take the engine
         player.stop()
+        // Startup-resume exit lands on the Guide: it's the natural "where do I go next" hub after
+        // surfing, and Back-from-player at boot had no meaningful section to return to anyway.
+        if (startupResumeToGuide) {
+            startupResumeToGuide = false
+            onSelectSection(MainSection.EPG)
+        }
         if (selectedSection != MainSection.LIVE_TV) liveVm.clearLiveOnExo()
         restoreFocus = true
         runCatching { sidebarFocus.requestFocus() }
