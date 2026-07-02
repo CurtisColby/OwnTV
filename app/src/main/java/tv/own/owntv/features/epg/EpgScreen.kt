@@ -79,7 +79,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-private val CHANNEL_COL = 176.dp
+private val CHANNEL_COL = 150.dp
 private val ROW_HEIGHT = 52.dp
 private val PX_PER_MIN = 4.dp
 private const val SLOT_MIN = 30
@@ -677,9 +677,9 @@ private fun ProgrammeStripCanvas(
     val timeNowStyle = MaterialTheme.typography.labelSmall.copy(color = colors.onPrimaryContainer)
     // Dimmed styles for programmes that have already finished — left of the "now" line reads calmer,
     // right of it (current + upcoming) stays at full brightness. Matches a real cable guide's look.
-    val titleStyleDim = MaterialTheme.typography.titleSmall.copy(color = colors.onSurface.copy(alpha = 0.45f))
-    val timeStyleDim = MaterialTheme.typography.labelSmall.copy(color = colors.onSurfaceVariant.copy(alpha = 0.45f))
-    val bgDim = colors.surfaceContainerHigh.copy(alpha = 0.5f)
+    val titleStyleDim = MaterialTheme.typography.titleSmall.copy(color = colors.onSurface.copy(alpha = 0.30f))
+    val timeStyleDim = MaterialTheme.typography.labelSmall.copy(color = colors.onSurfaceVariant.copy(alpha = 0.30f))
+    val bgDim = colors.surfaceContainerHigh.copy(alpha = 0.35f)
     val nowLineColor = colors.primary
     // Which programme is actually airing right now — computed ONCE per row rather than re-checked
     // per cell in the draw loop, so exactly one cell (never several) ever gets the "now" treatment
