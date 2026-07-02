@@ -5,6 +5,7 @@ import android.os.Handler
 import android.os.Looper
 import android.view.Surface
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.Player
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.util.UnstableApi
@@ -25,6 +26,13 @@ import tv.own.owntv.core.network.HttpClient
  * It is intentionally small: muted only, VOD start-position support, no HUD integration, and a single surface.
  * The Home screen keeps it alive while the hero is focused so the preview starts quickly and can be
  * reused across hero items without rebuilding the player each time.
+ *
+ * HLS hint (v4.0.9): SurfTV's external channels stream from /stream/ext/<id> — an extension-less URL
+ * that 302-redirects to an HLS playlist. ExoPlayer chooses its media source from the URL's extension
+ * BEFORE any network happens, so without a hint it builds a progressive (file) source that can never
+ * parse an HLS text playlist — every attempt fails instantly with an unrecognized-format error, no
+ * matter how many retries. [mediaItemFor] tags these URLs with the HLS MIME type so ExoPlayer builds
+ * an HlsMediaSource, the same source type the Live preview relies on for .m3u8 URLs.
  *
  * Retry logic: Plex FAST channels take ~6s for their CDN to spin up a stream session. If ExoPlayer
  * errors before a single frame has rendered (hasStarted == false), we retry up to MAX_RETRIES times
@@ -109,7 +117,7 @@ class HeroPreviewEngine(
                         surface?.let { p.setVideoSurface(it) }
                         p.volume = 0f
                         p.repeatMode = Player.REPEAT_MODE_ONE
-                        p.setMediaItem(MediaItem.fromUri(url), seekMs.coerceAtLeast(0L))
+                        p.setMediaItem(mediaItemFor(url), seekMs.coerceAtLeast(0L))
                         p.prepare()
                         p.playWhenReady = true
                     }.onFailure {
@@ -148,7 +156,7 @@ class HeroPreviewEngine(
             surface?.let { p.setVideoSurface(it) }
             p.volume = 0f
             p.repeatMode = Player.REPEAT_MODE_ONE
-            p.setMediaItem(MediaItem.fromUri(url), startPositionMs)
+            p.setMediaItem(mediaItemFor(url), startPositionMs)
             p.prepare()
             p.playWhenReady = true
         }.onFailure {
@@ -192,13 +200,28 @@ class HeroPreviewEngine(
         _state.value = State.IDLE
     }
 
+    /** Build the MediaItem for [url]. SurfTV external channels (/stream/ext/<id>) are extension-less
+     *  redirects to HLS — tag them with the HLS MIME type so ExoPlayer builds an HlsMediaSource instead
+     *  of a progressive source (which can never parse an HLS playlist). Everything else (SurfTV library
+     *  channels serving raw MPEG-TS, VOD files) keeps ExoPlayer's normal extension-based detection. */
+    private fun mediaItemFor(url: String): MediaItem =
+        if (url.contains("/stream/ext/")) {
+            MediaItem.Builder().setUri(url).setMimeType(MimeTypes.APPLICATION_M3U8).build()
+        } else {
+            MediaItem.fromUri(url)
+        }
+
     private fun build(): ExoPlayer {
         val dataSource = OkHttpDataSource.Factory(okHttpClient).setUserAgent(HttpClient.DEFAULT_USER_AGENT)
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(2_000, 8_000, 1_000, 2_000)
             .build()
+        // forceDisableMediaCodecAsynchronousQueueing(): same flag the Live preview engine uses — the
+        // async MediaCodec path corrupts (macroblocks) some UHD-HEVC streams on Realtek/Amlogic VPUs.
+        // Now that the hero decodes the same live HLS streams as the Live pane, match it exactly.
+        val renderers = DefaultRenderersFactory(context).forceDisableMediaCodecAsynchronousQueueing()
         return ExoPlayer.Builder(context)
-            .setRenderersFactory(DefaultRenderersFactory(context))
+            .setRenderersFactory(renderers)
             .setMediaSourceFactory(DefaultMediaSourceFactory(dataSource))
             .setLoadControl(loadControl)
             .build()
