@@ -401,6 +401,17 @@ class LiveViewModel(
         return channelDao.recentlyWatched(pid, 1).first().firstOrNull()
     }
 
+    /** The active profile's full live channel list, in the same order the Live TV "All channels" view
+     *  shows it (playlist order or A–Z per the section's sort setting). This is the surf list for
+     *  "resume last channel" at startup — without it, resume passed a one-channel list and CH+/CH−
+     *  had nowhere to go. Guarantees [channel] itself is present so zap can locate its position. */
+    suspend fun startupZapList(channel: ChannelEntity): List<ChannelEntity> {
+        val c = ctx.first { it.profileId >= 0 }
+        val all = channelDao.allForSources(c.sourceIds.ifEmpty { listOf(-1L) }, 10_000)
+        val ordered = if (sortMode.value == SettingsRepository.SortMode.ALPHA) all.sortedBy { it.name } else all
+        return if (ordered.any { it.id == channel.id }) ordered else listOf(channel) + ordered
+    }
+
     /** Open a channel fullscreen, remembering [list] so the remote can zap up/down from here. */
     fun watchFullscreen(channel: ChannelEntity, list: List<ChannelEntity>) {
         zapList = list

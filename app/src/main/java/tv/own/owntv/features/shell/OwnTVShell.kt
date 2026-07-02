@@ -148,7 +148,9 @@ fun OwnTVShell(
                 val ch = liveVm.lastWatchedLiveChannel()
                 if (ch != null && playerMode == PlayerMode.NONE) {
                     zapSource = MainSection.LIVE_TV
-                    liveVm.watchFullscreen(ch, listOf(ch))
+                    // Pass the profile's FULL live list as the surf list — resume used to pass
+                    // listOf(ch), which made CH+/CH− a dead end (zap needs 2+ channels to move).
+                    liveVm.watchFullscreen(ch, liveVm.startupZapList(ch))
                     playerMode = PlayerMode.FULLSCREEN
                 }
             }
