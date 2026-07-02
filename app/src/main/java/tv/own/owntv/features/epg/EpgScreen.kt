@@ -10,7 +10,6 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.Constraints
-import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -121,9 +120,12 @@ fun EpgScreen(
     var detail by remember { mutableStateOf<Pair<ChannelEntity, EpgProgrammeEntity>?>(null) }
     var matchingChannel by remember { mutableStateOf<ChannelEntity?>(null) }
     var matchChooser by remember { mutableStateOf<ChannelEntity?>(null) }
-    // Two-stage timeline navigation (#4): Right from a channel focuses its whole programme row (ROW
-    // stage); OK steps into per-programme browsing (CELL stage) where Left/Right move a cursor and
-    // Up/Down jump to the adjacent channel at the same time. cursorTime is the highlighted time.
+    // Timeline navigation: focusing a channel's programme strip lands DIRECTLY in per-programme
+    // browsing with the cursor on the now-playing cell (no intermediate whole-row stage — that extra
+    // OK press was removed). Left/Right move the cursor, Up/Down jump to the adjacent channel at the
+    // same time, Back snaps the timeline home and returns to the channel label. cursorTime is the
+    // highlighted time; it resets to "now" when entering from the label side and is preserved while
+    // hopping rows, so "what's on at 9pm across channels" browsing still works.
     var inCellMode by remember { mutableStateOf(false) }
     var cursorTime by remember { mutableStateOf(0L) }
     // The pending focus target onEnter routes to: our own restore requests cross into this group
@@ -163,19 +165,25 @@ fun EpgScreen(
     // fixed "now" landmark instead of pinning it to the left edge.
     var viewportWidthPx by remember { mutableStateOf(0f) }
 
-    // Open the guide scrolled so "now" sits a quarter of the way in from the left — a little history
-    // stays visible to the left, the rest of the window is ahead to the right (matches TiViMate).
+    // The guide's "home" scroll position: "now" a quarter of the way in from the left — a little
+    // history visible to the left, the rest of the window ahead to the right (matches TiViMate).
+    // Used on open AND whenever Back snaps the timeline home after browsing into the past/future.
     val density = LocalDensity.current
-    LaunchedEffect(state.windowStart, state.channels.isNotEmpty(), viewportWidthPx) {
-        if (state.channels.isEmpty() || viewportWidthPx <= 0f) return@LaunchedEffect
+    val scope = rememberCoroutineScope()
+    fun snapTimelineToNow() {
+        if (viewportWidthPx <= 0f) return
         val minutesBack = ((state.now - state.windowStart) / 60_000L).toInt()
         val nowPx = with(density) { (minutesBack * PX_PER_MIN.value).dp.toPx() }
         val target = (nowPx - viewportWidthPx / 4f).toInt().coerceAtLeast(0)
-        runCatching { hScroll.scrollTo(target) }
+        scope.launch { runCatching { hScroll.scrollTo(target) } }
+    }
+    LaunchedEffect(state.windowStart, state.channels.isNotEmpty(), viewportWidthPx) {
+        if (state.channels.isEmpty() || viewportWidthPx <= 0f) return@LaunchedEffect
+        snapTimelineToNow()
     }
 
-    // In CELL mode, Back steps out to whole-row (ROW) selection instead of leaving the guide.
-    BackHandler(enabled = inCellMode) { inCellMode = false }
+    // No screen-level Back handling for browse mode anymore: the programme strip intercepts Back
+    // itself (snap timeline home + focus the channel label), same pattern SearchBar already uses.
 
     // Keep the highlighted (cursor) programme in view while browsing a row in CELL mode.
     LaunchedEffect(cursorTime, inCellMode) {
@@ -343,6 +351,7 @@ fun EpgScreen(
                             onEnterCell = { cursorTime = state.now; inCellMode = true },
                             onExitToChannels = { inCellMode = false },
                             onMoveCursor = { cursorTime = it },
+                            onSnapToNow = { snapTimelineToNow() },
                         )
                     }
                 }
@@ -538,6 +547,7 @@ private fun GuideChannelRow(
     onEnterCell: () -> Unit,
     onExitToChannels: () -> Unit,
     onMoveCursor: (Long) -> Unit,
+    onSnapToNow: () -> Unit,
 ) {
     val colors = OwnTVTheme.colors
     // Cache peek as the initial value → rows render instantly from the batch-loaded cache, no flash, no
@@ -574,13 +584,18 @@ private fun GuideChannelRow(
                 modifier = Modifier.padding(horizontal = 12.dp),
             )
         }
-        // Programme strip = ONE focus target (cells aren't individually focusable). ROW stage outlines
-        // the whole strip; OK enters CELL stage where Left/Right move the cursor and Up/Down jump rows.
-        val rowSelected = stripFocused && !inCellMode
+        // Programme strip = ONE focus target (cells aren't individually focusable). Focusing the strip
+        // lands DIRECTLY in programme browsing with the cursor on the now-playing cell — no whole-row
+        // "press OK to enter" stage. The highlighted cell IS the focus indicator. Entering from the
+        // label side resets the cursor to now; Up/Down hops between rows keep the cursor time, so
+        // cross-channel "what's on later" browsing is preserved.
         Box(
             modifier = Modifier.weight(1f).height(ROW_HEIGHT)
                 .focusRequester(stripFR)
-                .onFocusChanged { stripFocused = it.isFocused }
+                .onFocusChanged {
+                    stripFocused = it.isFocused
+                    if (it.isFocused && !inCellMode) onEnterCell()
+                }
                 .onSizeChanged { onViewportWidth(it.width.toFloat()) }
                 .onKeyEvent { e ->
                     if (e.type != KeyEventType.KeyDown) return@onKeyEvent false
@@ -588,7 +603,25 @@ private fun GuideChannelRow(
                     if (inCellMode) when (e.key) {
                         Key.DirectionLeft -> { moveGuideCursor(progs, cursorTime, -1, windowStart, onMoveCursor); true }
                         Key.DirectionRight -> { moveGuideCursor(progs, cursorTime, +1, windowStart, onMoveCursor); true }
-                        Key.DirectionCenter, Key.Enter -> { progs?.let { openAtCursor(it, cursorTime, onOpen) }; true }
+                        Key.DirectionCenter, Key.Enter -> {
+                            // SurfTV (catch-up) channels open the detail dialog — "Watch from start" is
+                            // its whole value. External channels airing NOW tune instantly (their dialog
+                            // offers nothing but friction); external past/future cells still open the
+                            // dialog, since you can't tune into the future and the description IS the value.
+                            progs?.let {
+                                openAtCursor(it, cursorTime) { p ->
+                                    if (!channel.catchup && now in p.startMs until p.stopMs) onTune() else onOpen(p)
+                                }
+                            }
+                            true
+                        }
+                        Key.Back -> {
+                            // Back = "take me home": snap the timeline back to the now position and
+                            // return focus to the channel label (whose onFocusChanged exits browse mode).
+                            onSnapToNow()
+                            runCatching { labelFR.requestFocus() }
+                            true
+                        }
                         else -> false // Up/Down fall through to spatial nav (jump to the next channel's row)
                     } else when (e.key) {
                         Key.DirectionCenter, Key.Enter -> { if (!progs.isNullOrEmpty()) onEnterCell(); true }
@@ -598,17 +631,7 @@ private fun GuideChannelRow(
                     }
                 }
                 .focusable()
-                .clip(RoundedCornerShape(10.dp))
-                // Focused-row indicator: a clear accent border + soft tint so it's obvious which row
-                // you're on and that it's live (press OK to browse programmes). This is a single outline
-                // around the whole strip — deliberately NOT a bright treatment on every cell, which used
-                // to read as "the entire schedule is selected" instead of "this row is focused".
-                .then(
-                    if (rowSelected) Modifier
-                        .background(colors.primary.copy(alpha = 0.12f), RoundedCornerShape(10.dp))
-                        .border(Dimens.FocusBorderWidth, colors.focusBorder, RoundedCornerShape(10.dp))
-                    else Modifier
-                ),
+                .clip(RoundedCornerShape(10.dp)),
         ) {
             programmes?.let { progs ->
                 ProgrammeStripCanvas(
