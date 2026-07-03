@@ -173,6 +173,28 @@ class LiveViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
 
+    /**
+     * Category DB ids whose name is "Over-the-Air" (the group SurfTV stamps on HDHomeRun broadcast
+     * channels). OTA video is MPEG-2, which these boxes have no hardware decoder for — ExoPlayer (and
+     * mpv's hardware path) plays audio with a black screen. Channels in this group skip the
+     * ExoPlayer-first tune and start straight on mpv with SOFTWARE decoding (mpv bundles an FFmpeg
+     * MPEG-2 decoder) — the same routing a user-pinned "compatibility" channel gets.
+     */
+    private val otaCategoryIds: StateFlow<Set<Long>> = ctx
+        .flatMapLatest { c ->
+            if (c.profileId < 0) {
+                flowOf(emptySet())
+            } else {
+                categoryDao.observe(c.sourceIds, MediaType.LIVE)
+                    .map { cats -> cats.filter { it.name.equals(OTA_GROUP, ignoreCase = true) }.map { it.id }.toSet() }
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
+
+    /** True when [channel] belongs to the "Over-the-Air" group (broadcast MPEG-2 — see [otaCategoryIds]). */
+    private fun isOverTheAir(channel: ChannelEntity): Boolean =
+        channel.categoryId?.let { it in otaCategoryIds.value } == true
+
     /** Customizations + resolved hidden-category ids, bundled so the list pipeline takes one flow. */
     private data class CustState(val cust: SectionCustomizations, val hiddenCats: Set<Long>)
     private val custResolved: StateFlow<CustState> = combine(custom, hiddenCategoryIds) { c, h -> CustState(c, h) }
@@ -441,10 +463,13 @@ class LiveViewModel(
         _previewChannel.value = channel
         timeshiftJob?.cancel(); tickJob?.cancel(); _timeshiftOffsetSec.value = null // normal live = not timeshifted
         // Self-learning routing: a channel the user pinned to mpv skips ExoPlayer entirely (no artifacts/silent
-        // first), straight to the engine that plays it. Everyone else gets the fast ExoPlayer-first path.
+        // first), straight to the engine that plays it. Over-the-Air (broadcast MPEG-2) channels route the
+        // same way, additionally forcing mpv's software decoder (no hardware MPEG-2 on these boxes).
+        // Everyone else gets the fast ExoPlayer-first path.
+        val ota = isOverTheAir(channel)
         val pinned = channel.streamUrl in forceMpvUrls.value
-        android.util.Log.i(ENGINE_TAG, "tune '${channel.name}' -> ${if (pinned) "mpv (pinned)" else "exoplayer"}")
-        if (pinned) startOnMpv(channel) else startOnExo(channel)
+        android.util.Log.i(ENGINE_TAG, "tune '${channel.name}' -> ${if (ota) "mpv (OTA)" else if (pinned) "mpv (pinned)" else "exoplayer"}")
+        if (pinned || ota) startOnMpv(channel, preferSoftware = ota) else startOnExo(channel)
         recordLiveHistory(channel)
     }
 
@@ -462,8 +487,11 @@ class LiveViewModel(
         watchExoOutcome(channel)
     }
 
-    /** Start [channel] on the full mpv engine (pinned "compatibility" channel, or an ExoPlayer fallback). */
-    private fun startOnMpv(channel: ChannelEntity) { viewModelScope.launch { fallbackToMpv(channel) } }
+    /** Start [channel] on the full mpv engine (pinned "compatibility" channel, an Over-the-Air channel
+     *  — [preferSoftware] forces the software MPEG-2 decoder — or an ExoPlayer fallback). */
+    private fun startOnMpv(channel: ChannelEntity, preferSoftware: Boolean = false) {
+        viewModelScope.launch { fallbackToMpv(channel, preferSoftware) }
+    }
 
     /** HUD "compatibility mode" toggle: pin/unpin the current channel to mpv and swap engines live. */
     fun toggleForceMpv() {
@@ -520,13 +548,13 @@ class LiveViewModel(
     private fun isStill(channel: ChannelEntity) =
         _liveOnExo.value && _previewChannel.value?.streamUrl == channel.streamUrl
 
-    private suspend fun fallbackToMpv(channel: ChannelEntity) {
-        android.util.Log.i(ENGINE_TAG, "starting mpv for '${channel.name}'")
+    private suspend fun fallbackToMpv(channel: ChannelEntity, preferSoftware: Boolean = false) {
+        android.util.Log.i(ENGINE_TAG, "starting mpv for '${channel.name}'${if (preferSoftware) " (software decode)" else ""}")
         _liveOnExo.value = false            // shell flips to mpv's surface
         previewEngine.stop()
         delay(500)                          // let ExoPlayer's decoder release before mpv inits
         if (_previewChannel.value?.streamUrl == channel.streamUrl) {
-            player.play(channel.streamUrl, title = channel.name, logoUrl = channel.logoUrl, isLive = true, muted = false)
+            player.play(channel.streamUrl, title = channel.name, logoUrl = channel.logoUrl, isLive = true, muted = false, preferSoftware = preferSoftware)
         }
     }
 
@@ -756,6 +784,8 @@ class LiveViewModel(
 
     private companion object {
         const val ENGINE_TAG = "LiveEngine"
+        /** The M3U group-title SurfTV stamps on HDHomeRun broadcast channels (never match by number). */
+        const val OTA_GROUP = "Over-the-Air"
         const val TAG = "OwnTVHome"
         val defaultRail = listOf(
             LiveRailItem(LiveKey.Favorites, "FAV", "Favorites", OwnTVIcon.STAR),

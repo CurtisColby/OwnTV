@@ -255,8 +255,11 @@ class EpgViewModel(
                 player.play(edgeUrl, title = channel.name, subtitle = progTitle, logoUrl = channel.logoUrl,
                     isLive = true, startPositionMs = offsetMs)
             } else {
-                // Plain live tune (unchanged behaviour) — show just started, no EPG, or not a SurfTV channel.
-                player.play(channel.streamUrl, title = channel.name, logoUrl = channel.logoUrl, isLive = true)
+                // Plain live tune — show just started, no EPG, or not a SurfTV channel. Over-the-Air
+                // (broadcast) channels are MPEG-2, which these boxes can't hardware-decode (audio-only,
+                // black screen) — force mpv's software decoder for them, like catch-up already does.
+                player.play(channel.streamUrl, title = channel.name, logoUrl = channel.logoUrl, isLive = true,
+                    preferSoftware = isOverTheAir(channel))
             }
             val pid = currentProfileId() ?: return@launch
             runCatching {
@@ -266,6 +269,15 @@ class EpgViewModel(
             }
         }
     }
+
+    /** True when [channel] belongs to the "Over-the-Air" group (SurfTV's HDHomeRun broadcast channels).
+     *  These carry MPEG-2 video with no hardware decoder on the boxes — the tune must force mpv's
+     *  software decoder or video never starts. Matched by group NAME, never channel number (Plex FAST
+     *  numbering will eventually grow into the 500s). [guideCategories] is always populated here: it is
+     *  subscribed whenever the Guide is on screen, and play() is only reachable from the Guide. */
+    private fun isOverTheAir(channel: ChannelEntity): Boolean =
+        channel.categoryId != null &&
+            guideCategories.value.any { it.id == channel.categoryId && it.name.equals("Over-the-Air", ignoreCase = true) }
 
     /** Result of a mid-show-join computation: the /edge URL to play, the seek offset, and the show title. */
     private data class MidShowJoin(val edgeUrl: String, val offsetMs: Long, val title: String)
