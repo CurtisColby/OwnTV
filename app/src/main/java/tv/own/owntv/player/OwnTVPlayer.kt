@@ -169,6 +169,11 @@ class OwnTVPlayer(
     // per item, before the error shows — so the user no longer has to flip the global hardware-decoding
     // setting off. Per-item only; never changes the user's setting. Reset on each genuinely-new item.
     @Volatile private var forceSoftwareThisLoad = false
+    // The mirror image: a >1080p stream that lands on the SOFTWARE decoder because the global
+    // hardware-decoding setting is OFF is retried ONCE on hardware for THIS item only (the decode
+    // guard would otherwise abort it — TV CPUs can't sustain software >1080p). Never changes the
+    // user's setting. Reset on each genuinely-new item.
+    @Volatile private var forceHardwareThisLoad = false
     // A live Xtream stream that won't start on the default `.ts` (MPEG-TS) endpoint is retried once on
     // the provider's `.m3u8` (HLS) variant before erroring — covers the rare panel that only serves HLS.
     // Per-item; reset on each genuinely-new item.
@@ -177,9 +182,10 @@ class OwnTVPlayer(
     /** True while the direct (decoder-to-surface) output is in use — HUD hides zoom, app draws subs. */
     val directRender: StateFlow<Boolean> = _directRender.asStateFlow()
 
-    /** Hardware decoding effectively in use right now — the global setting, minus a per-item override
-     *  forced on after the hardware decoder failed to start a stream. */
-    private fun hwDecodingActive(): Boolean = hwDecoding && !forceSoftwareThisLoad
+    /** Hardware decoding effectively in use right now — the global setting, plus a per-item override
+     *  forced ON for >1080p rescued from the software path, minus a per-item override forced OFF after
+     *  the hardware decoder failed a stream. Software wins if both are set (hardware already failed). */
+    private fun hwDecodingActive(): Boolean = (hwDecoding || forceHardwareThisLoad) && !forceSoftwareThisLoad
 
     /** Silent-retry budget per content type: Live TV is worth retrying (cold-boot decoder lag, server
      *  hiccups). VOD gets 2 — most failures are bad links, but a back-to-back load (e.g. auto-play to the
@@ -932,8 +938,11 @@ class OwnTVPlayer(
             // the user's hardware-decoding setting. (Software renders via GL, which is broken on the
             // emulator, so skip the override there.)
             val wantSoftware = preferSoftware && !glUnsupported
-            val needReconfig = forceSoftwareThisLoad != wantSoftware
+            // A leftover per-item hardware override from the previous item also requires a reconfig
+            // (the new item must return to the user's setting).
+            val needReconfig = forceSoftwareThisLoad != wantSoftware || forceHardwareThisLoad
             forceSoftwareThisLoad = wantSoftware
+            forceHardwareThisLoad = false
             if (needReconfig) mpvAsync { applyRenderConfig() }
         }
         // Reset the decode watchdog + per-file video state.
@@ -965,42 +974,60 @@ class OwnTVPlayer(
             pendingUrl = url
         }
 
-        // Catch-up/VOD video watchdog: some archive (timeshift) segments start mid-GOP — audio plays
-        // but no H.264 frame ever decodes ("non-existing PPS" → blank, no error). If we're clearly
-        // playing (time advancing) yet have no video after a grace window, retry once in software
-        // (which recovers at the next keyframe) and only then surface a clear error. Live is excluded:
-        // it recovers on its own, and audio-only radio channels are legitimate.
-        if (!isLive) {
+        // Blank-video watchdog (VOD/catch-up AND live): audio plays but no frame ever decodes —
+        // mid-GOP archive segments ("non-existing PPS"), or a hardware decoder that silently accepts a
+        // live stream and outputs nothing (the mpv-hardware-on-MPEG-2 failure shape). If we're clearly
+        // playing (time advancing) yet have no video after a grace window, retry once in software and
+        // only then surface a clear error.
+        // Live safety check: audio-only (radio/music) channels are legitimate — a live tune only counts
+        // as "blank" when the stream HAS a selected video track (currentVideoCodec set by the observed
+        // `video-codec` property, which reports the demuxed track regardless of decode success).
+        run {
             val gen = loadGeneration
             videoCheckJob = scope.launch {
                 delay(7000)
-                if (gen != loadGeneration || isLiveContent || currentHeightPx > 0 || _position.value <= 0L) return@launch
-                // A stream we already know is >1080p must NOT go to software decode — the guard would just
-                // kill it. This is the auto-play-to-next-episode case: a transient hardware-decoder error
-                // (0x80001000) on the back-to-back load. Leave recovery to the direct-retry path (FILE_LOADED
-                // decode check), which re-inits the hardware decoder — exactly what a manual Retry does.
-                if (lastVideoHeightPx > 1080) {
+                if (gen != loadGeneration || currentHeightPx > 0 || _position.value <= 0L) return@launch
+                if (isLiveContent && currentVideoCodec == null) {
+                    android.util.Log.i(TAG, "live audio-only stream (no video track) — legitimate, watchdog stands down")
+                    return@launch
+                }
+                // A VOD stream we already know is >1080p must NOT go to software decode — the guard would
+                // just kill it. This is the auto-play-to-next-episode case: a transient hardware-decoder
+                // error (0x80001000) on the back-to-back load. Leave recovery to the direct-retry path
+                // (FILE_LOADED decode check), which re-inits the hardware decoder — exactly what a manual
+                // Retry does. Live is NOT skipped here: lastVideoHeightPx belongs to the PREVIOUS channel
+                // and says nothing about this one; if this stream turns out >1080p in software, the decode
+                // guard is the backstop.
+                if (!isLiveContent && lastVideoHeightPx > 1080) {
                     android.util.Log.w(TAG, "no video frames on a >1080p stream — leaving recovery to the direct retry (no software)")
                     return@launch
                 }
                 if (!triedSoftwareForVideo && hwDecodingActive() && !glUnsupported) {
                     triedSoftwareForVideo = true
                     forceSoftwareThisLoad = true
-                    android.util.Log.w(TAG, "no video frames (mid-GOP archive?) — retrying in software decode")
+                    android.util.Log.w(TAG, "no video frames (mid-GOP archive / silent hardware-decode failure) — retrying in software decode")
                     _buffering.value = true
                     mpvAsync { applyRenderConfig() }
                     delay(200)
                     if (gen == loadGeneration && currentUrl != null) {
-                        loadUrl(currentUrl!!, MediaMeta(currentTitle, currentSubtitle, currentYear, currentLogoUrl), isLiveContent, _position.value, resetRetries = false)
+                        loadUrl(
+                            currentUrl!!, MediaMeta(currentTitle, currentSubtitle, currentYear, currentLogoUrl),
+                            isLiveContent, if (isLiveContent) 0L else _position.value, resetRetries = false,
+                        )
                     }
                 } else {
                     android.util.Log.w(TAG, "no video frames decoded — surfacing error")
                     _buffering.value = false
-                    // Catch-up (preferSoftware) gets the archive wording; a movie/episode gets generic copy.
-                    _error.value = if (preferSoftware)
-                        "Couldn't play this recording. The archived segment may be incomplete or start mid-stream."
-                    else
-                        "Couldn't play this video — it may be unavailable or in a format this device can't decode."
+                    // Catch-up (preferSoftware) gets the archive wording; live gets channel wording;
+                    // a movie/episode gets generic copy.
+                    _error.value = when {
+                        isLiveContent ->
+                            "Couldn't show video for this channel — its format may not be supported by this TV."
+                        preferSoftware ->
+                            "Couldn't play this recording. The archived segment may be incomplete or start mid-stream."
+                        else ->
+                            "Couldn't play this video — it may be unavailable or in a format this device can't decode."
+                    }
                 }
             }
         }
@@ -1370,7 +1397,29 @@ class OwnTVPlayer(
         android.util.Log.w(TAG, "Decode guard TRIPPED: ${h}px on software decoder")
         decodeGuardTripped = true
         val res = resolutionLabel(h) ?: "${h}p"
-        val msg = if (hwDecoding) {
+        // The setting is OFF and this item is >1080p: before aborting, force the HARDWARE decoder for
+        // THIS item only (mirror of the software rescue) and reload in place. The user's setting is
+        // untouched — the next tune returns to software. If hardware also can't decode it, mpv falls
+        // back to software again, the guard re-trips, and this time (flag already set) it falls through
+        // to the honest error below. loadUrl resets decodeGuardTripped, so the re-trip can fire.
+        if (!hwDecoding && !forceSoftwareThisLoad && !forceHardwareThisLoad && currentUrl != null) {
+            android.util.Log.w(TAG, ">1080p on software (setting off) — rescuing on hardware decode for this item")
+            forceHardwareThisLoad = true
+            val gen = loadGeneration
+            scope.launch {
+                _buffering.value = true
+                mpvAsync { applyRenderConfig() }
+                delay(200)
+                if (gen == loadGeneration && currentUrl != null) {
+                    loadUrl(
+                        currentUrl!!, MediaMeta(currentTitle, currentSubtitle, currentYear, currentLogoUrl),
+                        isLiveContent, if (isLiveContent) 0L else _position.value, resetRetries = false,
+                    )
+                }
+            }
+            return
+        }
+        val msg = if (hwDecoding || forceHardwareThisLoad) {
             "This TV's hardware decoder doesn't support this $res video, and software decoding " +
                 "above 1080p would overload the TV."
         } else {
