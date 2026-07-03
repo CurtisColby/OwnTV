@@ -46,13 +46,22 @@ class ShellViewModel(
     connectivity: ConnectivityObserver,
     private val launcherIntegrationRepository: LauncherIntegrationRepository,
     private val epgMigration: tv.own.owntv.core.epg.EpgMigration,
+    private val epgSourceStore: tv.own.owntv.core.epg.EpgSourceStore,
+    private val epgRepository: tv.own.owntv.core.repository.EpgRepository,
 ) : ViewModel() {
 
     companion object {
         private const val TAG = "OwnTVHome"
+        /** A profile's guide feed older than this is silently refreshed on app start / profile switch.
+         *  The backend's guide is a rolling always-fresh 72h window; the client snapshot silently ages
+         *  because there is no other automatic refresh mechanism (Android TV kills background timers). */
+        private const val EPG_STALE_MS = 12 * 60 * 60 * 1000L // 12 hours
     }
 
     private var refreshedThisSession = false
+    // Profiles with an EPG staleness refresh currently in flight (prevents doubling up on a quick
+    // profile switch away and back). All access is on viewModelScope's main dispatcher.
+    private val epgRefreshInFlight = mutableSetOf<Long>()
 
     init {
         // One-time: move any existing playlist EPG into the new standalone EPG sources (v2.2.0).
@@ -65,7 +74,40 @@ class ShellViewModel(
                     if (pid >= 0 && settings.androidTvHomeEnabled.first()) {
                         runCatching { launcherIntegrationRepository.refreshProfile(pid, allowBrowsableRequest = true) }
                     }
+                    // Fires on app start AND on every profile switch — the two moments the S30-agreed
+                    // staleness design targets. EPG-only, silent, no-op when the guide is fresh.
+                    refreshStaleEpgIfNeeded(pid)
                 }
+        }
+    }
+
+    /** Silently refresh this profile's standalone EPG feeds whose last sync is older than
+     *  [EPG_STALE_MS]. EPG-only by design — playlists (channels) don't go stale, programmes do.
+     *  Failures are logged but do NOT stamp lastSyncAt, so an offline start retries at the next
+     *  app open instead of leaving the guide stale for another 12 h. */
+    private fun refreshStaleEpgIfNeeded(pid: Long) {
+        if (pid < 0 || pid in epgRefreshInFlight) return
+        viewModelScope.launch {
+            if (!isOnline.value) return@launch // offline start — retry at the next open
+            val now = System.currentTimeMillis()
+            val stale = runCatching { epgSourceStore.getForProfile(pid) }.getOrDefault(emptyList())
+                .filter { it.lastSyncAt == null || now - it.lastSyncAt > EPG_STALE_MS }
+            if (stale.isEmpty()) return@launch
+            epgRefreshInFlight += pid
+            try {
+                Log.i(TAG, "EPG staleness: ${stale.size} feed(s) older than 12h for profile=$pid — refreshing silently")
+                stale.forEach { s ->
+                    val at = System.currentTimeMillis()
+                    runCatching { epgRepository.refreshUrl(s.id, s.url, s.userAgent) }
+                        .onSuccess { count ->
+                            epgSourceStore.setSynced(s.id, at, null)
+                            Log.i(TAG, "EPG staleness: refreshed '${s.name}' ($count programmes) profile=$pid")
+                        }
+                        .onFailure { t -> Log.w(TAG, "EPG staleness: refresh failed for '${s.name}' profile=$pid", t) }
+                }
+            } finally {
+                epgRefreshInFlight -= pid
+            }
         }
     }
 
