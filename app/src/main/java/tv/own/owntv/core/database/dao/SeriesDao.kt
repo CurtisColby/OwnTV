@@ -79,8 +79,8 @@ interface SeriesDao {
     @Query("SELECT * FROM series WHERE sourceId IN (:sourceIds) ORDER BY RANDOM() LIMIT :limit")
     suspend fun randomSeries(sourceIds: List<Long>, limit: Int): List<SeriesEntity>
 
-    @Query("SELECT * FROM series WHERE categoryId = :categoryId ORDER BY RANDOM() LIMIT :limit")
-    suspend fun randomSeriesInCategory(categoryId: Long, limit: Int): List<SeriesEntity>
+    @Query("SELECT * FROM series WHERE categoryId = :categoryId AND sourceId IN (:sourceIds) ORDER BY RANDOM() LIMIT :limit")
+    suspend fun randomSeriesInCategory(categoryId: Long, sourceIds: List<Long>, limit: Int): List<SeriesEntity>
 
     @Query(
         "SELECT s.* FROM series s INNER JOIN favorites f ON f.itemId = s.id AND f.mediaType = 'SERIES' " +

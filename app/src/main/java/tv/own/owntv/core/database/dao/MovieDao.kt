@@ -69,8 +69,8 @@ interface MovieDao {
     @Query("SELECT * FROM movies WHERE sourceId IN (:sourceIds) ORDER BY RANDOM() LIMIT :limit")
     suspend fun randomAll(sourceIds: List<Long>, limit: Int): List<MovieEntity>
 
-    @Query("SELECT * FROM movies WHERE categoryId = :categoryId ORDER BY RANDOM() LIMIT :limit")
-    suspend fun randomInCategory(categoryId: Long, limit: Int): List<MovieEntity>
+    @Query("SELECT * FROM movies WHERE categoryId = :categoryId AND sourceId IN (:sourceIds) ORDER BY RANDOM() LIMIT :limit")
+    suspend fun randomInCategory(categoryId: Long, sourceIds: List<Long>, limit: Int): List<MovieEntity>
 
     @Query(
         "SELECT m.* FROM movies m INNER JOIN favorites f ON f.itemId = m.id AND f.mediaType = 'MOVIE' " +

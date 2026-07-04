@@ -139,6 +139,26 @@ class MovieViewModel(
                 if (shuffleActive && url in shuffleUrls) startShuffleQueue()
             }
         }
+        // Profile switch: wipe ALL per-profile UI state the moment the active profile changes, even
+        // while this screen is hidden. Leftover state pointed at the OLD profile's rows (a Folder key
+        // holds a category-row id of the old profile's source, and category queries have no source
+        // guard), which kept showing — and could even shuffle — the previous profile's content until
+        // a rail click installed fresh state. A privacy leak between profiles, not just staleness.
+        viewModelScope.launch {
+            var lastPid = -1L
+            ctx.map { it.profileId }.distinctUntilChanged().collect { pid ->
+                if (lastPid >= 0 && pid != lastPid) {
+                    _selected.value = LiveKey.All
+                    selectedFolderTitle = null
+                    _search.value = ""
+                    _selectedMovie.value = null
+                    playingMovie = null
+                    shuffleActive = false
+                    shuffleUrls = emptySet()
+                }
+                lastPid = pid
+            }
+        }
     }
 
     val railItems: StateFlow<List<LiveRailItem>> = ctx
@@ -154,6 +174,28 @@ class MovieViewModel(
             }
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, defaultRail)
+
+    /** The selected genre folder's NAME. Category row ids are wiped and re-generated on every sync
+     *  (refreshCategories clears + reinserts), so a held Folder(id) can silently start pointing at a
+     *  DIFFERENT genre after a background refresh — the grid and Shuffle would then show/play the
+     *  wrong content. The name is the stable handle; the id is re-resolved from it below. */
+    private var selectedFolderTitle: String? = null
+
+    // Second init (must run AFTER railItems is initialized — viewModelScope launches immediately):
+    // whenever the rail rebuilds, verify the selected Folder id still exists; if a sync re-dealt the
+    // ids, re-resolve the selection by name, and fall back to All when the genre is gone entirely.
+    init {
+        viewModelScope.launch {
+            railItems.collect { items ->
+                val sel = _selected.value
+                if (sel !is LiveKey.Folder) return@collect
+                val current = items.firstOrNull { it.key == sel }
+                if (current != null) { selectedFolderTitle = current.title; return@collect }
+                val byName = selectedFolderTitle?.let { t -> items.firstOrNull { it.key is LiveKey.Folder && it.title == t } }
+                _selected.value = byName?.key ?: LiveKey.All
+            }
+        }
+    }
 
     val movies: Flow<PagingData<MovieEntity>> = combine(
         _selected, ctx, _search.map { it.trim() }.debounce(300).distinctUntilChanged(), sortMode,
@@ -182,7 +224,10 @@ class MovieViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
-    fun select(key: LiveKey) { _selected.value = key }
+    fun select(key: LiveKey) {
+        _selected.value = key
+        selectedFolderTitle = if (key is LiveKey.Folder) railItems.value.firstOrNull { it.key == key }?.title else null
+    }
     fun setSearchQuery(query: String) { _search.value = query }
     fun onMovieFocused(movie: MovieEntity) { _selectedMovie.value = movie }
 
@@ -210,7 +255,7 @@ class MovieViewModel(
         val c = ctx.value
         val ids = c.sourceIds.ifEmpty { return false }
         val batch = when (val key = _selected.value) {
-            is LiveKey.Folder -> movieDao.randomInCategory(key.id, SHUFFLE_BATCH)
+            is LiveKey.Folder -> movieDao.randomInCategory(key.id, ids, SHUFFLE_BATCH)
             LiveKey.Favorites -> movieDao.randomFavorites(c.profileId, SHUFFLE_BATCH)
             else -> movieDao.randomAll(ids, SHUFFLE_BATCH) // All + History both surf the whole scope
         }

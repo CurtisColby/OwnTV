@@ -154,6 +154,28 @@ class SeriesViewModel(
                 else continueToNextSeason()
             }
         }
+        // Profile switch: wipe ALL per-profile UI state the moment the active profile changes, even
+        // while this screen is hidden. Leftover state pointed at the OLD profile's rows (a Folder key
+        // holds a category-row id of the old profile's source, the opened show is the old profile's
+        // series), which kept showing the previous profile's content — including a still-open episode
+        // list — until a click installed fresh state. A privacy leak between profiles, not staleness.
+        viewModelScope.launch {
+            var lastPid = -1L
+            ctx.map { it.profileId }.distinctUntilChanged().collect { pid ->
+                if (lastPid >= 0 && pid != lastPid) {
+                    _selected.value = LiveKey.All
+                    selectedFolderTitle = null
+                    _search.value = ""
+                    _selectedSeries.value = null
+                    _openedSeries.value = null
+                    _selectedSeason.value = 1
+                    _lastPlayedEpisodeId.value = null
+                    shuffleActive = false
+                    shuffleUrls = emptySet()
+                }
+                lastPid = pid
+            }
+        }
     }
 
     // --- Shuffle Play All state (browse-level cross-show surf; openedSeries stays null). ---
@@ -210,6 +232,28 @@ class SeriesViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, defaultRail)
 
+    /** The selected genre folder's NAME. Category row ids are wiped and re-generated on every sync
+     *  (refreshCategories clears + reinserts), so a held Folder(id) can silently start pointing at a
+     *  DIFFERENT genre after a background refresh — the grid and Shuffle would then show/play the
+     *  wrong content. The name is the stable handle; the id is re-resolved from it below. */
+    private var selectedFolderTitle: String? = null
+
+    // Second init (must run AFTER railItems is initialized — viewModelScope launches immediately):
+    // whenever the rail rebuilds, verify the selected Folder id still exists; if a sync re-dealt the
+    // ids, re-resolve the selection by name, and fall back to All when the genre is gone entirely.
+    init {
+        viewModelScope.launch {
+            railItems.collect { items ->
+                val sel = _selected.value
+                if (sel !is LiveKey.Folder) return@collect
+                val current = items.firstOrNull { it.key == sel }
+                if (current != null) { selectedFolderTitle = current.title; return@collect }
+                val byName = selectedFolderTitle?.let { t -> items.firstOrNull { it.key is LiveKey.Folder && it.title == t } }
+                _selected.value = byName?.key ?: LiveKey.All
+            }
+        }
+    }
+
     val series: Flow<PagingData<SeriesEntity>> = combine(
         _selected, ctx, _search.map { it.trim() }.debounce(300).distinctUntilChanged(), sortMode,
     ) { key, c, query, sort -> Args(key, c, query, sort) }
@@ -235,7 +279,10 @@ class SeriesViewModel(
         .flatMapLatest { s -> if (s == null) flowOf(emptyList()) else seriesDao.episodesBySeries(s.id) }
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
-    fun select(key: LiveKey) { _selected.value = key }
+    fun select(key: LiveKey) {
+        _selected.value = key
+        selectedFolderTitle = if (key is LiveKey.Folder) railItems.value.firstOrNull { it.key == key }?.title else null
+    }
     fun setSearchQuery(query: String) { _search.value = query }
     fun onSeriesFocused(s: SeriesEntity) { _selectedSeries.value = s }
     fun selectSeason(season: Int) { _selectedSeason.value = season }
@@ -320,7 +367,7 @@ class SeriesViewModel(
         val c = ctx.value
         val ids = c.sourceIds.ifEmpty { return false }
         val shows = when (val key = _selected.value) {
-            is LiveKey.Folder -> seriesDao.randomSeriesInCategory(key.id, SHUFFLE_SHOWS)
+            is LiveKey.Folder -> seriesDao.randomSeriesInCategory(key.id, ids, SHUFFLE_SHOWS)
             LiveKey.Favorites -> seriesDao.randomFavoriteSeries(c.profileId, SHUFFLE_SHOWS)
             else -> seriesDao.randomSeries(ids, SHUFFLE_SHOWS) // All + History both surf the whole scope
         }
