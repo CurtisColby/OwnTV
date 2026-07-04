@@ -173,6 +173,15 @@ fun MoviesScreen(
                     icon = if (viewMode == SettingsRepository.VodViewMode.GRID) OwnTVIcon.MENU else OwnTVIcon.MOVIES,
                     style = tv.own.owntv.ui.components.OwnTVButtonStyle.SECONDARY,
                 )
+                Spacer(Modifier.width(10.dp))
+                // Shuffle Play All: surf the current scope like a channel — random movie after random
+                // movie until you back out (Down/Up while watching skips through the shuffle).
+                OwnTVButton(
+                    label = "Shuffle",
+                    onClick = { scope.launch { if (vm.shufflePlayAllAsync()) onFullscreen() } },
+                    icon = OwnTVIcon.SHUFFLE,
+                    style = OwnTVButtonStyle.SECONDARY,
+                )
             }
             Spacer(Modifier.height(14.dp))
 

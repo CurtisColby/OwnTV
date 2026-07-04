@@ -12,6 +12,9 @@ import androidx.paging.PagingSource
 import androidx.paging.cachedIn
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.Flow
@@ -142,10 +145,20 @@ class SeriesViewModel(
         }
         // Auto-play continuation across seasons: the player advances within a season itself, then signals
         // here when a season's last episode finishes so we can start the next season's first episode.
+        // In Shuffle Play All mode the same signal instead deals a fresh cross-show batch (guarded by
+        // URL membership so a foreign queue — e.g. the Movies shuffle — never triggers either path).
         viewModelScope.launch {
-            player.queueEnded.collect { continueToNextSeason() }
+            player.queueEnded.collect {
+                val url = player.currentMediaUrl
+                if (shuffleActive && url != null && url in shuffleUrls) startShuffleQueue()
+                else continueToNextSeason()
+            }
         }
     }
+
+    // --- Shuffle Play All state (browse-level cross-show surf; openedSeries stays null). ---
+    private var shuffleActive = false
+    private var shuffleUrls: Set<String> = emptySet()
 
     /** A season's last episode finished with auto-play on — start the next season's first episode, if any.
      *  Matches the just-finished episode by its stream URL (robust to in-season auto-advance). */
@@ -293,7 +306,58 @@ class SeriesViewModel(
         playEpisodeQueue(show, seasonEpisodes, episode, startPositionMs)
     }
 
+    /** Shuffle Play All: pick random shows from the current rail scope, pull their episodes
+     *  (cached in the DB after the first fetch), shuffle EVERYTHING together and play it as one
+     *  continuous cross-show queue. queueEnded deals a fresh batch, so it never stops until the
+     *  user backs out. Returns false when nothing playable was found. */
+    suspend fun shufflePlayAllAsync(): Boolean {
+        val ok = startShuffleQueue()
+        shuffleActive = ok
+        return ok
+    }
+
+    private suspend fun startShuffleQueue(): Boolean {
+        val c = ctx.value
+        val ids = c.sourceIds.ifEmpty { return false }
+        val shows = when (val key = _selected.value) {
+            is LiveKey.Folder -> seriesDao.randomSeriesInCategory(key.id, SHUFFLE_SHOWS)
+            LiveKey.Favorites -> seriesDao.randomFavoriteSeries(c.profileId, SHUFFLE_SHOWS)
+            else -> seriesDao.randomSeries(ids, SHUFFLE_SHOWS) // All + History both surf the whole scope
+        }
+        if (shows.isEmpty()) return false
+        // Fetch each show's episodes in parallel (get_series_info; instant when already cached in the
+        // DB) and pool them with their parent show so the player card can say what's on.
+        val pool: List<Pair<SeriesEntity, EpisodeEntity>> = coroutineScope {
+            shows.map { show ->
+                async {
+                    if (seriesRepository.loadEpisodes(show)) {
+                        seriesDao.episodesBySeries(show.id).first().map { show to it }
+                    } else emptyList()
+                }
+            }.awaitAll().flatten()
+        }
+        if (pool.isEmpty()) return false
+        val batch = pool.shuffled().take(SHUFFLE_BATCH)
+        Log.d(TAG, "shufflePlayAll shows=${shows.size} pool=${pool.size} batch=${batch.size} key=${_selected.value}")
+        shuffleUrls = batch.map { it.second.streamUrl }.toSet()
+        player.playEpisodes(
+            items = batch.map { (show, ep) ->
+                PlaylistItem(
+                    url = ep.streamUrl,
+                    meta = MediaMeta(
+                        title = ep.name,
+                        subtitle = "Shuffle · ${show.name} · S${ep.seasonNumber}E${ep.episodeNumber}",
+                        logoUrl = show.posterUrl,
+                    ),
+                )
+            },
+            startIndex = 0,
+        )
+        return true
+    }
+
     fun playEpisodeQueue(show: SeriesEntity, queue: List<EpisodeEntity>, episode: EpisodeEntity, startPositionMs: Long = 0) {
+        shuffleActive = false // a deliberate episode pick ends surf mode
         _openedSeries.value = show
         _lastPlayedEpisodeId.value = episode.id
         viewModelScope.launch {
@@ -394,6 +458,10 @@ class SeriesViewModel(
 
     private companion object {
         const val TAG = "OwnTVHome"
+        /** Shows pulled per shuffle round (each is one get_series_info, fetched in parallel and
+         *  DB-cached afterwards) and the max episodes dealt into one queue. */
+        const val SHUFFLE_SHOWS = 10
+        const val SHUFFLE_BATCH = 300
         val defaultRail = listOf(
             LiveRailItem(LiveKey.Favorites, "FAV", "Favorites", OwnTVIcon.STAR),
             LiveRailItem(LiveKey.History, "HIS", "History", OwnTVIcon.HISTORY),

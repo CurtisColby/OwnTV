@@ -102,6 +102,7 @@ fun SeriesScreen(
         if (restoreFocus) onRestored()
         SeriesGrid(
             vm = vm,
+            onFullscreen = onFullscreen,
             onChildFocused = onChildFocused,
             restoreSelected = returnFromShow,
             onRestoredSelected = { returnFromShow = false },
@@ -113,11 +114,16 @@ fun SeriesScreen(
 @Composable
 private fun SeriesGrid(
     vm: SeriesViewModel,
+    onFullscreen: () -> Unit,
     onChildFocused: () -> Unit,
     restoreSelected: Boolean = false,
     onRestoredSelected: () -> Unit = {},
     modifier: Modifier,
 ) {
+    // Shuffle Play All is async here (episodes for the picked shows may need fetching) — the
+    // button shows a busy label and ignores repeat presses while a round is being dealt.
+    val shuffleScope = rememberCoroutineScope()
+    var shuffling by remember { mutableStateOf(false) }
     val railItems by vm.railItems.collectAsStateWithLifecycle()
     val selectedKey by vm.selectedKey.collectAsStateWithLifecycle()
     val count by vm.count.collectAsStateWithLifecycle()
@@ -191,6 +197,22 @@ private fun SeriesGrid(
                     onClick = vm::toggleViewMode,
                     icon = if (viewMode == SettingsRepository.VodViewMode.GRID) OwnTVIcon.MENU else OwnTVIcon.SERIES,
                     style = tv.own.owntv.ui.components.OwnTVButtonStyle.SECONDARY,
+                )
+                Spacer(Modifier.width(10.dp))
+                // Shuffle Play All: random episodes from random shows, surfed end-to-end like a
+                // channel until you back out (Down/Up while watching skips through the shuffle).
+                OwnTVButton(
+                    label = if (shuffling) "Shuffling…" else "Shuffle",
+                    onClick = {
+                        if (!shuffling) {
+                            shuffling = true
+                            shuffleScope.launch {
+                                try { if (vm.shufflePlayAllAsync()) onFullscreen() } finally { shuffling = false }
+                            }
+                        }
+                    },
+                    icon = OwnTVIcon.SHUFFLE,
+                    style = OwnTVButtonStyle.SECONDARY,
                 )
             }
             Spacer(Modifier.height(14.dp))

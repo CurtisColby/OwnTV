@@ -74,6 +74,20 @@ interface SeriesDao {
     @Query("SELECT * FROM series WHERE sourceId IN (:sourceIds) AND name LIKE '%' || :query || '%' ORDER BY name ASC LIMIT :limit")
     suspend fun searchList(query: String, sourceIds: List<Long>, limit: Int): List<SeriesEntity>
 
+    // --- Shuffle Play All: random shows to build a cross-show episode queue from, scoped to
+    // match the browse rail (All / folder / favorites). SQLite does the picking. ---
+    @Query("SELECT * FROM series WHERE sourceId IN (:sourceIds) ORDER BY RANDOM() LIMIT :limit")
+    suspend fun randomSeries(sourceIds: List<Long>, limit: Int): List<SeriesEntity>
+
+    @Query("SELECT * FROM series WHERE categoryId = :categoryId ORDER BY RANDOM() LIMIT :limit")
+    suspend fun randomSeriesInCategory(categoryId: Long, limit: Int): List<SeriesEntity>
+
+    @Query(
+        "SELECT s.* FROM series s INNER JOIN favorites f ON f.itemId = s.id AND f.mediaType = 'SERIES' " +
+            "WHERE f.profileId = :profileId ORDER BY RANDOM() LIMIT :limit",
+    )
+    suspend fun randomFavoriteSeries(profileId: Long, limit: Int): List<SeriesEntity>
+
     @Query(
         "SELECT s.* FROM series s INNER JOIN favorites f ON f.itemId = s.id AND f.mediaType = 'SERIES' " +
             "WHERE f.profileId = :profileId AND s.name LIKE '%' || :query || '%' ORDER BY f.addedAt DESC",

@@ -23,7 +23,7 @@ enum class OwnTVIcon {
     PERSON, ADD, SETTINGS, PALETTE, THEME, ZOOM, PLAYLIST, EPG, VIDEO, SHARE, CHEVRON, FAVORITE,
     PAUSE, REWIND, FORWARD, AUDIO, SUBTITLE, SKIP_NEXT, SKIP_PREVIOUS,
     BACK, VOLUME_HIGH, VOLUME_LOW, VOLUME_MUTE, ASPECT, FULLSCREEN, FULLSCREEN_EXIT, PIP, CLOSE,
-    SORT,
+    SORT, SHUFFLE,
 }
 
 @Composable
@@ -71,6 +71,18 @@ fun OwnTVIcon(
                 drawLineStroke(p(4f, 7f), p(20f, 7f), tint, stroke)
                 drawLineStroke(p(4f, 12f), p(14f, 12f), tint, stroke)
                 drawLineStroke(p(4f, 17f), p(9f, 17f), tint, stroke)
+            }
+            OwnTVIcon.SHUFFLE -> { // crossing arrows — classic shuffle glyph
+                // Bottom-left → top-right, with the arrowhead at the top-right.
+                drawLineStroke(p(3f, 17f), p(17f, 7f), tint, stroke)
+                drawLineStroke(p(17f, 7f), p(21f, 7f), tint, stroke)
+                drawLineStroke(p(18f, 4.5f), p(21f, 7f), tint, stroke)
+                drawLineStroke(p(18f, 9.5f), p(21f, 7f), tint, stroke)
+                // Top-left → bottom-right, with the arrowhead at the bottom-right.
+                drawLineStroke(p(3f, 7f), p(17f, 17f), tint, stroke)
+                drawLineStroke(p(17f, 17f), p(21f, 17f), tint, stroke)
+                drawLineStroke(p(18f, 14.5f), p(21f, 17f), tint, stroke)
+                drawLineStroke(p(18f, 19.5f), p(21f, 17f), tint, stroke)
             }
             OwnTVIcon.HISTORY -> {
                 drawCircleStroke(p(12f, 12f), 9f * s, tint, stroke)

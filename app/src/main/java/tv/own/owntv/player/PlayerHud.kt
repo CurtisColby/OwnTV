@@ -131,6 +131,11 @@ fun PlayerHud(
     var showFlash by remember { mutableStateOf(false) }
     LaunchedEffect(channelFlash) { if (channelFlash > 0) { showFlash = true; delay(3000); showFlash = false } }
     val zap: (Int) -> Unit = { d -> (if (d < 0) onChannelUp else onChannelDown)?.invoke(); channelFlash++ }
+    // VOD queue surf (Shuffle Play All / episode queues): Down = next, Up = previous — the same
+    // gesture as zapping a live channel, with the same brief "now watching" card. Only while the
+    // HUD is hidden (visible controls own Up/Down) and only when the queue actually has a
+    // neighbour in that direction; a single movie (no queue) keeps the old wake-the-HUD behaviour.
+    val vodSurf: (Int) -> Unit = { d -> if (d < 0) player.previous() else player.next(); channelFlash++ }
 
     LaunchedEffect(forceShow) { if (forceShow) controlsVisible = true }
     LaunchedEffect(controlsVisible, wakeTick, forceShow) {
@@ -153,6 +158,12 @@ fun PlayerHud(
                 canZap && (e.key == Key.ChannelDown || e.key == Key.MediaNext) -> { zap(1); true }
                 canZap && !controlsVisible && e.key == Key.DirectionUp -> { zap(-1); true }
                 canZap && !controlsVisible && e.key == Key.DirectionDown -> { zap(1); true }
+                // VOD queue surf: the exact same gestures skip through a play queue (shuffle mode or a
+                // season's episodes). Media keys work HUD-up or hidden; D-pad only while hidden.
+                !isLive && e.key == Key.MediaNext && nav.hasNext -> { vodSurf(1); true }
+                !isLive && e.key == Key.MediaPrevious && nav.hasPrev -> { vodSurf(-1); true }
+                !isLive && !controlsVisible && e.key == Key.DirectionDown && nav.hasNext -> { vodSurf(1); true }
+                !isLive && !controlsVisible && e.key == Key.DirectionUp && nav.hasPrev -> { vodSurf(-1); true }
                 // Left while the HUD is hidden opens the channel-list overlay (live only).
                 onOpenChannelList != null && !controlsVisible && e.key == Key.DirectionLeft -> { onOpenChannelList(); true }
                 controlsVisible -> { wakeTick++; false }
@@ -173,8 +184,9 @@ fun PlayerHud(
             StreamInfoOverlay(player, modifier = Modifier.align(Alignment.TopEnd).padding(top = 84.dp, end = 20.dp))
         }
 
-        // Channel flash card (zapping with the HUD hidden) — shown independently of the full controls.
-        if (isLive && showFlash && !controlsVisible) {
+        // "Now watching" flash card (zapping a live channel or surfing a VOD queue with the HUD
+        // hidden) — shown independently of the full controls.
+        if (showFlash && !controlsVisible) {
             ChannelCard(player, modifier = Modifier.align(Alignment.TopStart).padding(start = 28.dp, top = 28.dp))
         }
 

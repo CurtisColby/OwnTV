@@ -51,7 +51,9 @@ import tv.own.owntv.features.live.LiveKey
 import tv.own.owntv.core.download.DownloadManager
 import tv.own.owntv.core.storage.StorageAccess
 import tv.own.owntv.features.settings.data.SettingsRepository
+import tv.own.owntv.player.MediaMeta
 import tv.own.owntv.player.OwnTVPlayer
+import tv.own.owntv.player.PlaylistItem
 import tv.own.owntv.ui.components.OwnTVIcon
 
 class MovieViewModel(
@@ -116,12 +118,25 @@ class MovieViewModel(
 
     private var playingMovie: MovieEntity? = null
 
+    // --- Shuffle Play All state: the URLs of the queue we armed (so a foreign queue's end never
+    // triggers a movie reshuffle) and whether shuffle mode is live right now. ---
+    private var shuffleActive = false
+    private var shuffleUrls: Set<String> = emptySet()
+
     init {
         // Periodically persist resume position for the movie currently playing.
         viewModelScope.launch {
             while (isActive) {
                 delay(10_000)
                 saveProgressNow()
+            }
+        }
+        // Continuous shuffle: when the LAST item of a queue finishes and it was OUR shuffle queue,
+        // deal a fresh shuffled batch and keep going — surfing never stops until the user backs out.
+        viewModelScope.launch {
+            player.queueEnded.collect {
+                val url = player.currentMediaUrl ?: return@collect
+                if (shuffleActive && url in shuffleUrls) startShuffleQueue()
             }
         }
     }
@@ -179,7 +194,44 @@ class MovieViewModel(
     suspend fun savedPositionMs(movie: MovieEntity): Long =
         currentProfileId()?.let { progressDao.get(it, MediaType.MOVIE, movie.id)?.positionMs ?: 0 } ?: 0
 
+    /** Shuffle Play All: deal a random queue from the current rail scope (All / genre folder /
+     *  Favorites — History falls back to All) and start playing it front to back. The player's
+     *  auto-play advances movie→movie at each natural end; queueEnded re-deals so it never stops.
+     *  Returns false when the scope has nothing to shuffle (screen stays put). */
+    suspend fun shufflePlayAllAsync(): Boolean {
+        val ok = startShuffleQueue()
+        shuffleActive = ok
+        return ok
+    }
+
+    /** Builds one shuffled batch and hands it to the player. Shared by the button and the
+     *  continuous-reshuffle collector. */
+    private suspend fun startShuffleQueue(): Boolean {
+        val c = ctx.value
+        val ids = c.sourceIds.ifEmpty { return false }
+        val batch = when (val key = _selected.value) {
+            is LiveKey.Folder -> movieDao.randomInCategory(key.id, SHUFFLE_BATCH)
+            LiveKey.Favorites -> movieDao.randomFavorites(c.profileId, SHUFFLE_BATCH)
+            else -> movieDao.randomAll(ids, SHUFFLE_BATCH) // All + History both surf the whole scope
+        }
+        if (batch.isEmpty()) return false
+        Log.d(TAG, "shufflePlayAll batch=${batch.size} key=${_selected.value}")
+        shuffleUrls = batch.map { it.streamUrl }.toSet()
+        playingMovie = null // surf mode: no single tracked movie, so no resume-position writes
+        player.playEpisodes(
+            items = batch.map { m ->
+                PlaylistItem(
+                    url = m.streamUrl,
+                    meta = MediaMeta(title = m.name, subtitle = "Shuffle · Movies", year = m.year?.toString(), logoUrl = m.posterUrl),
+                )
+            },
+            startIndex = 0,
+        )
+        return true
+    }
+
     fun play(movie: MovieEntity, startPositionMs: Long = 0) {
+        shuffleActive = false // a deliberate single pick ends surf mode
         viewModelScope.launch {
             val pid = currentProfileId()
             Log.d(TAG, "play movieId=${movie.id} profile=$pid startPositionMs=$startPositionMs")
@@ -299,6 +351,8 @@ class MovieViewModel(
 
     private companion object {
         const val TAG = "OwnTVHome"
+        /** Max movies dealt per shuffle round — plenty of runway, and queueEnded re-deals anyway. */
+        const val SHUFFLE_BATCH = 300
         val defaultRail = listOf(
             LiveRailItem(LiveKey.Favorites, "FAV", "Favorites", OwnTVIcon.STAR),
             LiveRailItem(LiveKey.History, "HIS", "History", OwnTVIcon.HISTORY),
