@@ -22,6 +22,7 @@ import androidx.compose.ui.unit.Density
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import org.koin.android.ext.android.inject
 import org.koin.androidx.compose.koinViewModel
+import org.koin.androidx.viewmodel.ext.android.viewModel
 import tv.own.owntv.core.launcher.LauncherDeepLink
 import tv.own.owntv.features.profiles.ProfileGate
 import tv.own.owntv.features.profiles.ProfilesViewModel
@@ -39,6 +40,9 @@ class MainActivity : ComponentActivity() {
     private val player: tv.own.owntv.player.OwnTVPlayer by inject()
     private val previewEngine: tv.own.owntv.player.LivePreviewEngine by inject()
     private val heroPreviewEngine: tv.own.owntv.player.HeroPreviewEngine by inject()
+    // The SAME ShellViewModel instance koinViewModel() resolves inside setContent (both are scoped
+    // to this Activity) — gives onStart() a handle for the foreground refresh hook.
+    private val shellViewModel: ShellViewModel by viewModel()
     private var pendingDeepLink by mutableStateOf<LauncherDeepLink?>(null)
 
     override fun onNewIntent(intent: Intent) {
@@ -68,6 +72,10 @@ class MainActivity : ComponentActivity() {
         // to the live edge — so Play resumes instead of sitting on a dead/empty stream. No-op on fresh launch.
         player.onAppForegrounded()
         previewEngine.onAppForegrounded()
+        // Android TV keeps the process parked for days, so "opening the app" is usually this
+        // resume — not a cold start. Re-run the staleness-gated refreshes (EPG feeds + the
+        // "refresh on startup" playlist sync) here; both are free no-ops when under 12h old.
+        shellViewModel.onAppForegrounded()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

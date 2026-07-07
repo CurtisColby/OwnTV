@@ -58,7 +58,12 @@ class ShellViewModel(
         private const val EPG_STALE_MS = 12 * 60 * 60 * 1000L // 12 hours
     }
 
-    private var refreshedThisSession = false
+    // When the "refresh on startup" playlist sync last ran. Replaces the old once-per-process
+    // boolean: Android TV keeps the process resident for days, so "app start" almost never means
+    // a cold start — reopening the app just resumes the parked process. A timestamp with the same
+    // 12h staleness window re-arms the sync so returning after days away actually refreshes.
+    private var lastStartupPlaylistSyncAt = 0L
+    private var playlistSyncInFlight = false
     // Profiles with an EPG staleness refresh currently in flight (prevents doubling up on a quick
     // profile switch away and back). All access is on viewModelScope's main dispatcher.
     private val epgRefreshInFlight = mutableSetOf<Long>()
@@ -88,7 +93,10 @@ class ShellViewModel(
     private fun refreshStaleEpgIfNeeded(pid: Long) {
         if (pid < 0 || pid in epgRefreshInFlight) return
         viewModelScope.launch {
-            if (!isOnline.value) return@launch // offline start — retry at the next open
+            // On a cold start the connectivity observer may not have reported in yet and would
+            // momentarily read offline — wait up to 5s for it to come online before giving up.
+            // A genuinely offline box still skips (and retries at the next foreground).
+            kotlinx.coroutines.withTimeoutOrNull(5_000) { isOnline.first { it } } ?: return@launch
             val now = System.currentTimeMillis()
             val stale = runCatching { epgSourceStore.getForProfile(pid) }.getOrDefault(emptyList())
                 .filter { it.lastSyncAt == null || now - it.lastSyncAt > EPG_STALE_MS }
@@ -115,14 +123,32 @@ class ShellViewModel(
     val isOnline: StateFlow<Boolean> = connectivity.isOnline
         .stateIn(viewModelScope, SharingStarted.Eagerly, connectivity.isOnlineNow())
 
-    /** Re-sync the sources flagged "refresh on startup" for the active profile (once per launch). */
-    fun refreshOnStartIfEnabled() {
-        if (refreshedThisSession) return
-        refreshedThisSession = true
+    /** Called from MainActivity.onStart() every time the app comes to the foreground (cold start
+     *  OR resuming the parked process days later — the case the old once-per-process design missed).
+     *  Both checks below are staleness-gated no-ops when everything is under 12h old, so bouncing
+     *  to the launcher and back during an evening costs nothing. */
+    fun onAppForegrounded() {
         viewModelScope.launch {
+            val pid = currentProfileId() ?: return@launch
+            refreshStaleEpgIfNeeded(pid)
+            refreshOnStartIfEnabled()
+        }
+    }
+
+    /** Re-sync the sources flagged "refresh on startup" for the active profile — at most once per
+     *  12h window, re-armed on every app foreground (not just per process launch). */
+    fun refreshOnStartIfEnabled() {
+        if (playlistSyncInFlight) return
+        if (System.currentTimeMillis() - lastStartupPlaylistSyncAt < EPG_STALE_MS) return
+        playlistSyncInFlight = true
+        viewModelScope.launch {
+          try {
+            // Same cold-start grace as the EPG check: don't burn the 12h window while offline.
+            kotlinx.coroutines.withTimeoutOrNull(5_000) { isOnline.first { it } } ?: return@launch
             val ids = settings.refreshSourceIds.first()
             if (ids.isEmpty()) return@launch
             val pid = currentProfileId() ?: return@launch
+            lastStartupPlaylistSyncAt = System.currentTimeMillis()
             Log.d(TAG, "refreshOnStartIfEnabled profile=$pid sourceIds=$ids androidTvHomeEnabled=${settings.androidTvHomeEnabled.first()}")
             sourceRepository.observeSources(pid).first()
                 .filter { it.id in ids }
@@ -135,6 +161,9 @@ class ShellViewModel(
             if (settings.androidTvHomeEnabled.first()) {
                 runCatching { launcherIntegrationRepository.refreshProfile(pid, allowBrowsableRequest = true) }
             }
+          } finally {
+            playlistSyncInFlight = false
+          }
         }
     }
 
