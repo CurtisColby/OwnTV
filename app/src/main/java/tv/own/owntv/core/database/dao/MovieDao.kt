@@ -114,4 +114,63 @@ interface MovieDao {
             "WHERE h.profileId = :profileId ORDER BY h.watchedAt DESC LIMIT :limit",
     )
     fun recentlyWatched(profileId: Long, limit: Int): Flow<List<MovieEntity>>
+
+    // --- Browse-order queue (D-pad surf from a deliberate pick) ---
+    // The grid is PAGED, so the full on-screen list never exists in memory to hand the player.
+    // These mirror the paging queries above one-for-one (same WHERE, same ORDER BY) and materialise
+    // a bounded list so a deliberate pick can be handed over as a real queue instead of one item.
+    // Category variants carry the sourceIds guard the paging ones lack — same privacy hardening as
+    // the Shuffle queries (a stale category id must never reach another profile's rows).
+    @Query("SELECT * FROM movies WHERE sourceId IN (:sourceIds) ORDER BY name ASC LIMIT :limit")
+    suspend fun listAll(sourceIds: List<Long>, limit: Int): List<MovieEntity>
+
+    @Query(
+        "SELECT * FROM movies WHERE sourceId IN (:sourceIds) " +
+            "ORDER BY sourceId ASC, sortOrder ASC, name ASC LIMIT :limit",
+    )
+    suspend fun listAllOriginal(sourceIds: List<Long>, limit: Int): List<MovieEntity>
+
+    @Query(
+        "SELECT * FROM movies WHERE categoryId = :categoryId AND sourceId IN (:sourceIds) " +
+            "ORDER BY sortOrder ASC, name ASC LIMIT :limit",
+    )
+    suspend fun listByCategory(categoryId: Long, sourceIds: List<Long>, limit: Int): List<MovieEntity>
+
+    @Query(
+        "SELECT * FROM movies WHERE categoryId = :categoryId AND sourceId IN (:sourceIds) " +
+            "ORDER BY name ASC LIMIT :limit",
+    )
+    suspend fun listByCategoryAlpha(categoryId: Long, sourceIds: List<Long>, limit: Int): List<MovieEntity>
+
+    @Query(
+        "SELECT m.* FROM movies m INNER JOIN favorites f ON f.itemId = m.id AND f.mediaType = 'MOVIE' " +
+            "WHERE f.profileId = :profileId ORDER BY f.addedAt DESC LIMIT :limit",
+    )
+    suspend fun listFavorites(profileId: Long, limit: Int): List<MovieEntity>
+
+    @Query(
+        "SELECT m.* FROM movies m INNER JOIN watch_history h ON h.itemId = m.id AND h.mediaType = 'MOVIE' " +
+            "WHERE h.profileId = :profileId ORDER BY h.watchedAt DESC LIMIT :limit",
+    )
+    suspend fun listHistory(profileId: Long, limit: Int): List<MovieEntity>
+
+    @Query(
+        "SELECT * FROM movies WHERE categoryId = :categoryId AND sourceId IN (:sourceIds) " +
+            "AND name LIKE '%' || :query || '%' ORDER BY sortOrder ASC, name ASC LIMIT :limit",
+    )
+    suspend fun searchListInCategory(query: String, categoryId: Long, sourceIds: List<Long>, limit: Int): List<MovieEntity>
+
+    @Query(
+        "SELECT m.* FROM movies m INNER JOIN favorites f ON f.itemId = m.id AND f.mediaType = 'MOVIE' " +
+            "WHERE f.profileId = :profileId AND m.name LIKE '%' || :query || '%' " +
+            "ORDER BY f.addedAt DESC LIMIT :limit",
+    )
+    suspend fun searchListFavorites(query: String, profileId: Long, limit: Int): List<MovieEntity>
+
+    @Query(
+        "SELECT m.* FROM movies m INNER JOIN watch_history h ON h.itemId = m.id AND h.mediaType = 'MOVIE' " +
+            "WHERE h.profileId = :profileId AND m.name LIKE '%' || :query || '%' " +
+            "ORDER BY h.watchedAt DESC LIMIT :limit",
+    )
+    suspend fun searchListHistory(query: String, profileId: Long, limit: Int): List<MovieEntity>
 }
