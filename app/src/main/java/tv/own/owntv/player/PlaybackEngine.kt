@@ -46,6 +46,9 @@ interface PlaybackEngine {
     val nav: StateFlow<NavState> get() = NO_NAV
     /** In-player A/V-sync nudge (ms) — VOD/mpv only; a live engine leaves it at 0. */
     val audioDelayMs: StateFlow<Int> get() = ZERO_INT
+    /** Emits the title of a queue item that failed terminally and is being auto-skipped (VOD queues
+     *  only), so the HUD can flash a "couldn't play — skipping" card. Live engines never emit. */
+    val skipNotice: kotlinx.coroutines.flow.SharedFlow<String> get() = NO_SKIP_NOTICES
     fun setSpeed(speed: Double) {}
     fun adjustAudioDelay(deltaMs: Int) {}
     fun previous() {}
@@ -58,6 +61,8 @@ interface PlaybackEngine {
         private val ONE_DOUBLE: StateFlow<Double> = MutableStateFlow(1.0)
         private val NO_NAV: StateFlow<NavState> = MutableStateFlow(NavState(hasPrev = false, hasNext = false))
         private val NULL_ERROR: StateFlow<ErrorInfo?> = MutableStateFlow(null)
+        private val NO_SKIP_NOTICES: kotlinx.coroutines.flow.SharedFlow<String> =
+            kotlinx.coroutines.flow.MutableSharedFlow()
     }
 }
 
@@ -79,6 +84,7 @@ class MpvPlaybackEngine(private val p: OwnTVPlayer) : PlaybackEngine {
     override val speed get() = p.speed
     override val nav get() = p.nav
     override val audioDelayMs get() = p.audioDelayMs
+    override val skipNotice get() = p.skipNotice
     override fun togglePlayPause() = p.togglePlayPause()
     override fun setZoomMode(mode: ZoomMode) = p.setZoomMode(mode)
     override fun adjustVolume(delta: Int) = p.adjustVolume(delta)

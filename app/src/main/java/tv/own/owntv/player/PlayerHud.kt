@@ -53,6 +53,7 @@ import coil3.compose.AsyncImage
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import tv.own.owntv.ui.components.FocusableSurface
 import tv.own.owntv.ui.components.OwnTVButton
 import tv.own.owntv.ui.components.OwnTVIcon
@@ -136,6 +137,17 @@ fun PlayerHud(
     // HUD is hidden (visible controls own Up/Down) and only when the queue actually has a
     // neighbour in that direction; a single movie (no queue) keeps the old wake-the-HUD behaviour.
     val vodSurf: (Int) -> Unit = { d -> if (d < 0) player.previous() else player.next(); channelFlash++ }
+    // VOD queue auto-skip flash: "Couldn't play X — skipping" when the queue jumps over a dead or
+    // undecodable item, so the user always knows WHY the video changed under them. collectLatest so a
+    // rapid second skip restarts the card with the new title instead of queuing behind the old one.
+    var skipNoticeTitle by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(Unit) {
+        player.skipNotice.collectLatest { t ->
+            skipNoticeTitle = t
+            delay(4000)
+            skipNoticeTitle = null
+        }
+    }
 
     LaunchedEffect(forceShow) { if (forceShow) controlsVisible = true }
     LaunchedEffect(controlsVisible, wakeTick, forceShow) {
@@ -188,6 +200,12 @@ fun PlayerHud(
         // hidden) — shown independently of the full controls.
         if (showFlash && !controlsVisible) {
             ChannelCard(player, modifier = Modifier.align(Alignment.TopStart).padding(start = 28.dp, top = 28.dp))
+        }
+
+        // Auto-skip flash card — shown even if the controls are up (an unexplained video change is worse
+        // than a briefly overlapped HUD). Sits below the zap-card spot so the two never stack directly.
+        skipNoticeTitle?.let { t ->
+            SkipCard(t, modifier = Modifier.align(Alignment.TopStart).padding(start = 28.dp, top = if (showFlash && !controlsVisible) 110.dp else 28.dp))
         }
 
         if (controlsVisible) {
@@ -331,6 +349,24 @@ private fun ChannelCard(player: PlaybackEngine, modifier: Modifier = Modifier) {
             meta.subtitle?.takeIf { it.isNotBlank() }?.let {
                 Text(it, style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.5f), maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
+        }
+    }
+}
+
+/** "Couldn't play — skipping" flash card for VOD queue auto-skip. Same shape/backdrop as [ChannelCard]
+ *  so it reads as part of the same family, with an amber badge instead of a logo. */
+@Composable
+private fun SkipCard(title: String, modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier.widthIn(max = 420.dp).clip(RoundedCornerShape(14.dp)).background(Color.Black.copy(alpha = 0.55f)).padding(14.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Box(Modifier.size(44.dp).clip(RoundedCornerShape(10.dp)).background(Color(0xFF4A3200)), contentAlignment = Alignment.Center) {
+            Text("!", style = MaterialTheme.typography.titleMedium, color = Color(0xFFFFC96F), fontWeight = FontWeight.Bold)
+        }
+        Column {
+            Text("Couldn't play \u201C$title\u201D", style = MaterialTheme.typography.titleSmall, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text("Skipping to the next video…", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.5f), maxLines = 1)
         }
     }
 }

@@ -91,6 +91,7 @@ class OwnTVPlayer(
     private companion object {
         const val TAG = "OwnTVPlayer"
         const val MAX_AUTO_RETRIES = 3 // silent retries (backoff) before showing the error UI
+        const val MAX_CONSECUTIVE_SKIPS = 3 // queue auto-skips in a row before the error UI shows anyway
         // Warn-level mpv lines worth keeping as the failure reason (HTTP codes, open/decode failures, …).
         val FAILURE_RX = Regex(
             "http|error|fail|refus|timed out|unrecogn|cannot|no such|invalid|denied|forbidden|not found|" +
@@ -178,6 +179,15 @@ class OwnTVPlayer(
     // the provider's `.m3u8` (HLS) variant before erroring — covers the rare panel that only serves HLS.
     // Per-item; reset on each genuinely-new item.
     @Volatile private var triedAltFormat = false
+    // VOD queue auto-skip: consecutive TERMINAL failures (dead source links → HTTP 502, 4K H.264 over the
+    // hardware-decoder ceiling, …). Bumped on each auto-skip; reset by ~10 s of healthy playback or a fresh
+    // deliberate play()/playEpisodes(). At MAX_CONSECUTIVE_SKIPS the error UI shows instead, so a broken
+    // source (Plex down, provider outage) can't spin the queue forever.
+    @Volatile private var consecutiveSkipFailures = 0
+    // Whole seconds of genuinely advancing playback for the CURRENT item (time-pos ticks). FILE_LOADED and
+    // the height property both fire even on a bad 4K item BEFORE the decode guard kills it, so neither can
+    // prove health — only sustained real progress resets the skip budget.
+    @Volatile private var playbackTicks = 0
     private val _directRender = MutableStateFlow(false)
     /** True while the direct (decoder-to-surface) output is in use — HUD hides zoom, app draws subs. */
     val directRender: StateFlow<Boolean> = _directRender.asStateFlow()
@@ -433,6 +443,11 @@ class OwnTVPlayer(
     // the current season's queue). Within-season advance is handled by the player itself.
     private val _queueEnded = kotlinx.coroutines.flow.MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val queueEnded: kotlinx.coroutines.flow.SharedFlow<Unit> = _queueEnded
+
+    // Emits the title of a queue item that failed terminally and is being auto-skipped, so the HUD can
+    // flash a "couldn't play — skipping" card (reuses the zap-card style). VOD queues only; never live.
+    private val _skipNotice = kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity = 4)
+    val skipNotice: kotlinx.coroutines.flow.SharedFlow<String> = _skipNotice
 
     var currentTitle: String? = null
         private set
@@ -855,6 +870,7 @@ class OwnTVPlayer(
     ) {
         playlist = emptyList()
         playlistIndex = 0
+        consecutiveSkipFailures = 0 // fresh deliberate pick → fresh auto-skip budget
         updateNav()
         _zoomMode.value = defaultZoom // start new content at the user's default zoom
         loadUrl(url, MediaMeta(title, subtitle, year, logoUrl), isLive, startPositionMs, muted, preferSoftware = preferSoftware, startPaused = startPaused)
@@ -864,6 +880,7 @@ class OwnTVPlayer(
     fun playEpisodes(items: List<PlaylistItem>, startIndex: Int, startPositionMs: Long = 0) {
         playlist = items
         playlistIndex = startIndex.coerceIn(0, (items.size - 1).coerceAtLeast(0))
+        consecutiveSkipFailures = 0 // fresh deliberate queue → fresh auto-skip budget
         val item = items.getOrNull(playlistIndex) ?: return
         _zoomMode.value = defaultZoom
         loadUrl(item.url, item.meta, isLive = false, startPositionMs)
@@ -892,6 +909,40 @@ class OwnTVPlayer(
 
     private fun updateNav() {
         _nav.value = NavState(playlistIndex > 0, playlistIndex < playlist.size - 1)
+    }
+
+    /** VOD queue auto-skip: TERMINAL playback failures route here instead of setting [_error] directly.
+     *  If the queue has a next item — and we're online and under the consecutive-failure cap — flash a
+     *  "couldn't play, skipping" card and advance via the existing [next] path (the exact S32/33
+     *  auto-advance machinery) instead of parking on the Retry screen. Live channels, the last queue
+     *  item, offline, and a cap-exhausted run all fall through to the error UI exactly as before. */
+    private fun surfaceVodError(msg: String) {
+        val canSkip = !isLiveContent &&
+            playlistIndex < playlist.size - 1 &&
+            consecutiveSkipFailures < MAX_CONSECUTIVE_SKIPS &&
+            connectivity.isOnlineNow()
+        if (!canSkip) {
+            _buffering.value = false
+            _error.value = msg
+            return
+        }
+        consecutiveSkipFailures++
+        android.util.Log.w(TAG, "VOD queue auto-skip $consecutiveSkipFailures/$MAX_CONSECUTIVE_SKIPS — $msg")
+        _skipNotice.tryEmit(currentTitle ?: "this video")
+        // Supersede any still-pending retry/watchdog work for the dead item, then advance after the same
+        // decoder-release settle the natural auto-advance uses (loadUrl's fresh-Surface logic covers a
+        // back-to-back 4K load).
+        loadGeneration++
+        expectingPlayback = false
+        errorCheckJob?.cancel()
+        videoCheckJob?.cancel()
+        _error.value = null
+        _buffering.value = true
+        val gen = loadGeneration
+        scope.launch {
+            delay(600)
+            if (gen == loadGeneration) next()
+        }
     }
 
     private fun loadUrl(
@@ -923,6 +974,7 @@ class OwnTVPlayer(
         _videoRes.value = null
         _videoFps.value = null
         expectingPlayback = true
+        playbackTicks = 0 // new item → restart the healthy-playback counter for the auto-skip budget
         pendingSeekMs = startPositionMs
         applyAudioDelay(baseAudioDelayMs) // new item starts at the Settings default — drop any per-file nudge
         // A genuinely new item resets the failure budget; an auto-retry / software-fallback reload of
@@ -1017,17 +1069,16 @@ class OwnTVPlayer(
                     }
                 } else {
                     android.util.Log.w(TAG, "no video frames decoded — surfacing error")
-                    _buffering.value = false
                     // Catch-up (preferSoftware) gets the archive wording; live gets channel wording;
-                    // a movie/episode gets generic copy.
-                    _error.value = when {
+                    // a movie/episode gets generic copy. Routed through the queue auto-skip gatekeeper.
+                    surfaceVodError(when {
                         isLiveContent ->
                             "Couldn't show video for this channel — its format may not be supported by this TV."
                         preferSoftware ->
                             "Couldn't play this recording. The archived segment may be incomplete or start mid-stream."
                         else ->
                             "Couldn't play this video — it may be unavailable or in a format this device can't decode."
-                    }
+                    })
                 }
             }
         }
@@ -1357,6 +1408,9 @@ class OwnTVPlayer(
             "time-pos" -> {
                 _position.value = value * 1000
                 if (value > 0) expectingPlayback = false // playback actually started
+                // ~10 s of genuinely advancing playback = a healthy item → the consecutive-failure run is
+                // over, reset the auto-skip budget. (Ticks, not absolute position — mid-show joins start high.)
+                if (playbackTicks < 10 && ++playbackTicks == 10) consecutiveSkipFailures = 0
             }
             "duration" -> _duration.value = value * 1000
             "width" -> {
@@ -1435,8 +1489,7 @@ class OwnTVPlayer(
         mpvAsync { stopWithStopClassification("decodeGuard") }
         scope.launch {
             _isPlaying.value = false
-            _buffering.value = false
-            _error.value = msg
+            surfaceVodError(msg) // 4K-over-the-decoder-ceiling in a queue → skip instead of Retry
         }
     }
 
@@ -1613,7 +1666,7 @@ class OwnTVPlayer(
                                 scope.launch { loadUrl(currentUrl ?: return@launch, MediaMeta(currentTitle, currentSubtitle, currentYear, currentLogoUrl), isLiveContent, pos, resetRetries = false) }
                             } else {
                                 android.util.Log.w(TAG, "direct failed — retries exhausted, showing error")
-                                scope.launch { _buffering.value = false; _error.value = "This TV's video decoder is busy. Try again in a moment." }
+                                scope.launch { surfaceVodError("This TV's video decoder is busy. Try again in a moment.") }
                             }
                             return@mpvAsync
                         }
@@ -1707,8 +1760,9 @@ class OwnTVPlayer(
                                 )
                             }
                         } else {
-                            _buffering.value = false
-                            _error.value = "Couldn't play this stream. The source may be offline or use an unsupported format."
+                            // Dead source links (e.g. a deleted/privated video → HTTP 502) land here after
+                            // the silent-retry budget — in a queue, skip instead of parking on Retry.
+                            surfaceVodError("Couldn't play this stream. The source may be offline or use an unsupported format.")
                         }
                     }
                 } else if (isLiveContent && currentUrl != null) {
